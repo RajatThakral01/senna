@@ -1,0 +1,8 @@
+{
+  "subtitle_style": "karaoke",
+  "aspect_ratio": "9:16",
+  "fade": true,
+  "split_screen": false,
+  "music": null,
+  "min_clip_duration": 45
+}

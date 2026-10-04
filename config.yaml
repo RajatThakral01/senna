@@ -1,0 +1,50 @@
+ffmpeg:
+  path: "~/miniforge3/bin/ffmpeg"
+  encoder: "libx264"
+  preset: "fast"
+  crf: 23
+
+paths:
+  input_dir: "input/"
+  output_dir: "output/"
+  assets_dir: "assets/"
+  temp_dir: "temp/"
+
+ai:
+  provider: "nvidia_nim"
+  llm_model: "moonshotai/kimi-k2.6"
+  llm_endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
+
+defaults:
+  min_clip_duration: 45
+  aspect_ratio: "9:16"
+  music_volume: 0.3
+  fade_duration: 0.5
+
+# ── Database ──────────────────────────────────────────────────────────────────
+database:
+  host: "localhost"
+  port: 5432
+  name: "viral_clips"
+  user: "postgres"          # Default postgres user — override via .env (DB_USER)
+  password: ""              # Set via .env as DB_PASSWORD if required
+
+# ── Chunking ──────────────────────────────────────────────────────────────────
+chunking:
+  silence_threshold_seconds: 1.2
+  max_tokens_per_chunk: 1000
+  overlap_seconds: 25
+  min_chunk_duration_seconds: 15
+
+# ── Embeddings ────────────────────────────────────────────────────────────────
+embeddings:
+  model: "nvidia/nv-embedqa-e5-v5"   # 1024-dim, fits pgvector HNSW index limit (<= 2000)
+  endpoint: "https://integrate.api.nvidia.com/v1/embeddings"
+  input_type_storage: "passage"       # used when storing chunks/clips
+  input_type_query: "query"           # used when searching (similarity.py)
+
+# ── Similarity Search ─────────────────────────────────────────────────────────
+similarity:
+  top_k: 3
+  threshold: 0.65
+  llm_confirmation: true

@@ -1,0 +1,100 @@
+# ==============================================================================
+# Git Ignore - Viral Clips Automator
+# ==============================================================================
+
+# --- Python & Bytecode ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Virtual Environments ---
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Environment Variables & Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Testing & Code Coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+.mypy_cache/
+.ruff_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# --- Pipeline Runtime Artifacts & Media ---
+# Ignore generated clips, audio downloads, transcripts and rendered videos,
+# but preserve the directories in git via .gitkeep
+clips/*
+!clips/.gitkeep
+downloads/*
+!downloads/.gitkeep
+output/*
+!output/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+temp/
+
+# Ignore raw video input binaries (preserve python source files in input/)
+input/*.mp4
+input/*.mov
+input/*.mkv
+input/*.avi
+input/*.webm
+input/*.flv
+input/*.m4v
+
+# --- OS Artifacts ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+*~
+
+# --- IDE & Editor Settings ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# --- Logs & Temporary Files ---
+*.log
+*.tmp
