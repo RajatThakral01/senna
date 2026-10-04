@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 import subprocess
 import os
+import time
+from logger import get_logger
+
+log = get_logger("pipeline.fast_burn")
 
 def parse_srt(srt_path):
+    log.debug("parse_srt path=%s", srt_path)
     with open(srt_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -18,6 +23,7 @@ def parse_srt(srt_path):
             end = parse_srt_time(end_str.strip())
             subtitles.append((start, end, text))
 
+    log.debug("parse_srt segments=%d path=%s", len(subtitles), srt_path)
     return subtitles
 
 def parse_srt_time(time_str):
@@ -65,13 +71,21 @@ def build_filter_complex(subtitles):
 
 def burn_subtitles(clip_num, clip_path, output_path):
     srt_path = f"clips/clip_{clip_num}.srt"
+    t0 = time.monotonic()
+    log.info("burn start clip=%s in=%.60s out=%.60s", clip_num, clip_path, output_path)
 
-    print(f"\nProcessing clip {clip_num}...")
-
-    subtitles = parse_srt(srt_path)
-    print(f"  Found {len(subtitles)} subtitle segments")
+    try:
+        subtitles = parse_srt(srt_path)
+    except FileNotFoundError:
+        log.error("burn missing SRT clip=%s path=%s", clip_num, srt_path)
+        return False
+    log.info("burn clip=%s subtitles=%d", clip_num, len(subtitles))
+    if not subtitles:
+        log.warning("burn clip=%s empty subtitles, skipping ffmpeg", clip_num)
+        return False
 
     filter_chain, last_tag = build_filter_complex(subtitles)
+    log.debug("burn clip=%s filter_len=%d tag=%s", clip_num, len(filter_chain), last_tag)
 
     cmd = [
         os.path.expanduser('~/miniforge3/bin/ffmpeg'),
@@ -85,16 +99,16 @@ def burn_subtitles(clip_num, clip_path, output_path):
         output_path
     ]
 
-    print(f"  Running FFmpeg...")
+    log.info("burn clip=%s running ffmpeg", clip_num)
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        print(f"  ERROR: FFmpeg failed")
-        print(result.stderr[-3000:] if len(result.stderr) > 3000 else result.stderr)
+        log.error("burn clip=%s ffmpeg failed rc=%d err=%.500s", clip_num, result.returncode,
+                  result.stderr[-3000:] if result.stderr and len(result.stderr) > 3000 else (result.stderr or ""))
         return False
 
-    size = os.path.getsize(output_path)
-    print(f"  Done: {output_path} ({size / (1024*1024):.1f} MB)")
+    size = os.path.getsize(output_path) if os.path.exists(output_path) else -1
+    log.info("burn done clip=%s out=%s bytes=%d elapsed=%.1fs", clip_num, output_path, size, time.monotonic() - t0)
     return True
 
 def main():
@@ -102,14 +116,13 @@ def main():
     os.chdir(project_root)
 
     for clip_num in range(1, 6):
-        success = burn_subtitles(clip_num)
+        success = burn_subtitles(clip_num, clip_path=f"clips/clip_{clip_num}_vertical.mp4",
+                                 output_path=f"output/clip_{clip_num}_final.mp4")
         if not success:
-            print(f"Failed at clip {clip_num}")
+            log.error("failed at clip %d", clip_num)
             break
 
-    print("\n" + "="*50)
-    print("Final output files:")
-    print("="*50)
+    log.info("final output files in output/")
     subprocess.run(['ls', '-lh', 'output/'])
 
 if __name__ == '__main__':

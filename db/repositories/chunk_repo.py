@@ -8,12 +8,16 @@ Input:  Chunk metadata from pipeline/chunker.py; embedding vectors from pipeline
 Output: Chunk UUID strings; chunk row dicts; similarity-ranked chunk lists.
 """
 from db.connection import get_conn, release_conn
+import logging
+
+log = logging.getLogger("db.chunk_repo")
 
 
 def insert_chunk(video_id: str, chunk_index: int, start_time: float, end_time: float,
                  text: str, token_count: int, is_overlap_tail: bool,
                  silence_gap_before: float) -> str:
     """Insert a chunk row and return its UUID string."""
+    log.debug("insert_chunk video=%.8s idx=%d %.1f-%.1f", video_id, chunk_index, start_time, end_time)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -28,12 +32,16 @@ def insert_chunk(video_id: str, chunk_index: int, start_time: float, end_time: f
             chunk_id = cur.fetchone()[0]
             conn.commit()
             return str(chunk_id)
+    except Exception:
+        log.exception("insert_chunk failed idx=%d", chunk_index)
+        raise
     finally:
         release_conn(conn)
 
 
 def update_embedding(chunk_id: str, embedding: list) -> None:
     """Write the embedding vector for a chunk (pgvector column)."""
+    log.debug("update_embedding chunk=%.8s dim=%d", str(chunk_id), len(embedding) if embedding else 0)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -42,12 +50,16 @@ def update_embedding(chunk_id: str, embedding: list) -> None:
                 (embedding, chunk_id)
             )
             conn.commit()
+    except Exception:
+        log.exception("update_embedding failed chunk=%.8s", str(chunk_id))
+        raise
     finally:
         release_conn(conn)
 
 
 def get_chunks_for_video(video_id: str) -> list:
     """Return all chunks for a video ordered by chunk_index."""
+    log.debug("get_chunks video=%.8s", video_id)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -59,7 +71,12 @@ def get_chunks_for_video(video_id: str) -> list:
                 ORDER BY chunk_index ASC
             """, (video_id,))
             cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+            log.debug("get_chunks video=%.8s count=%d", video_id, len(rows))
+            return rows
+    except Exception:
+        log.exception("get_chunks failed video=%.8s", video_id)
+        raise
     finally:
         release_conn(conn)
 
@@ -74,6 +91,7 @@ def find_similar_chunks(query_embedding: list, video_id: str,
     Returns a list of dicts with keys:
         id, chunk_index, start_time, end_time, text, similarity (float 0-1)
     """
+    log.debug("vector search video=%.8s top_k=%d thr=%.2f", video_id, top_k, threshold)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -96,17 +114,10 @@ def find_similar_chunks(query_embedding: list, video_id: str,
                 # Ensure id is a plain string
                 d["id"] = str(d["id"])
                 rows.append(d)
+            log.debug("vector search hits=%d", len(rows))
             return rows
-    finally:
-        release_conn(conn)
-
-
-def delete_chunks_for_video(video_id: str) -> None:
-    """Delete all chunks for a video (used when re-processing a video from scratch)."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM chunks WHERE video_id = %s", (video_id,))
-            conn.commit()
+    except Exception:
+        log.exception("vector search failed")
+        raise
     finally:
         release_conn(conn)

@@ -75,6 +75,10 @@ input/*.avi
 input/*.webm
 input/*.flv
 input/*.m4v
+input/*.part
+input/*.ytdl
+*.part
+*.ytdl
 
 # --- OS Artifacts ---
 .DS_Store

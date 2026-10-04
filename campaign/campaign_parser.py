@@ -1,8 +1,11 @@
 import os
 import json
+import time
 import uuid
 import requests
 import sys
+from logger import get_logger
+log = get_logger("campaign")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
 
@@ -39,6 +42,9 @@ def parse_campaign(description: str, available_assets: dict) -> dict:
         "music": ["track1.mp3", "upbeat.mp3"]
     }
     """
+    log.info("parse_campaign desc=%.120s logos=%d music=%d",
+             description, len(available_assets.get("logos", [])),
+             len(available_assets.get("music", [])))
     user_prompt = f"""
 Campaign description: {description}
 
@@ -50,8 +56,8 @@ Match mentioned assets to available files. If a specific file is not mentioned
 but a type is (e.g., "add logo"), use the first available one.
 Return only the JSON config.
 """
-    if not LLM_API_KEY or LLM_API_KEY == "your_minimax_api_key_here":
-        print("⚠️ LLM_API_KEY not set. Returning a mock response.")
+    if not LLM_API_KEY or LLM_API_KEY == "your_nvidia_api_key_here":
+        log.warning("LLM key missing, returning mock campaign config")
         # Return a mock response for testing without a real API key
         mock_config = {
             "campaign_id": "mock_id",
@@ -73,8 +79,13 @@ Return only the JSON config.
             mock_config["template"] = "motivational_reel"
         if "reaction" in description:
             mock_config["template"] = "tiktok_reaction"
+        log.info("parse_campaign mock done logo=%s subtitles=%s template=%s",
+                 mock_config.get("logo"), mock_config.get("subtitles"), mock_config.get("template"))
         return mock_config
 
+
+    t0 = time.monotonic()
+    log.debug("parse_campaign LLM call model=%s", LLM_MODEL)
 
     payload = {
         "model": LLM_MODEL,
@@ -89,8 +100,12 @@ Return only the JSON config.
         "Authorization": f"Bearer {LLM_API_KEY}",
         "Content-Type": "application/json"
     }
-    response = requests.post(LLM_API_URL, json=payload, headers=headers)
-    response.raise_for_status()
+    try:
+        response = requests.post(LLM_API_URL, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+    except Exception:
+        log.exception("parse_campaign LLM request failed")
+        raise
 
     raw = response.json()["choices"][0]["message"]["content"].strip()
 
@@ -105,4 +120,7 @@ Return only the JSON config.
 
     config = json.loads(raw)
     config["campaign_id"] = str(uuid.uuid4())[:8]
+    log.info("parse_campaign done id=%s logo=%s music=%s subtitles=%s elapsed=%.1fs",
+             config.get("campaign_id"), config.get("logo"), config.get("music"),
+             config.get("subtitles"), time.monotonic() - t0)
     return config

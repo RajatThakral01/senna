@@ -9,12 +9,16 @@ continuation before setting confirmed_by_llm = TRUE.
 
 import os
 import json
+import time
 import requests
 import re
+from logger import get_logger
 from db.repositories import chunk_repo, clip_repo
 from db.connection import get_conn, release_conn
 
 from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
+
+log = get_logger("pipeline.similarity")
 
 
 def find_related_segments(video_id: str, clips: list[dict],
@@ -26,25 +30,36 @@ def find_related_segments(video_id: str, clips: list[dict],
     Writes results to related_segments table.
     Returns the clips list augmented with a 'related_segments' key.
     """
+    t0 = time.monotonic()
+    log.info("similarity start video=%.8s clips=%d top_k=%d threshold=%.2f", video_id, len(clips), top_k, threshold)
     for clip in clips:
+        cn = clip.get("clip_number")
         if not clip.get("embedding"):
-            print(f"[similarity] Clip {clip['clip_number']} has no embedding — skipping")
+            log.warning("clip %s has no embedding — skipping", cn)
             continue
 
+        log.debug("clip %s vector search top_k=%d thr=%.2f", cn, top_k, threshold)
         related = chunk_repo.find_similar_chunks(
             query_embedding=clip["embedding"],
             video_id=video_id,
             top_k=top_k,
             threshold=threshold,
         )
+        log.debug("clip %s candidates=%d", cn, len(related))
 
         # Exclude the source chunk itself
-        source_ids = set(clip.get("source_chunk_ids", []))
+        source_ids = set(str(s) for s in clip.get("source_chunk_ids", []))
         related = [r for r in related if str(r["id"]) not in source_ids]
+        if len(related) != len(related):
+            log.debug("clip %s filtered source chunks", cn)
 
         confirmed = []
         for rel_chunk in related:
+            log.debug("clip %s LLM-confirm chunk %.1f-%.1f sim=%.3f", cn,
+                      rel_chunk.get("start_time", 0), rel_chunk.get("end_time", 0),
+                      rel_chunk.get("similarity", 0))
             decision = _llm_confirm_continuation(clip, rel_chunk)
+            log.debug("clip %s decision=%s sim=%.3f", cn, decision, rel_chunk.get("similarity", 0))
 
             _write_related_segment(
                 clip_id=clip["id"],
@@ -58,8 +73,11 @@ def find_related_segments(video_id: str, clips: list[dict],
 
         clip["related_segments"] = confirmed
         if confirmed:
-            print(f"[similarity] Clip {clip['clip_number']} has {len(confirmed)} confirmed continuations")
+            log.info("clip %s has %d confirmed continuations", cn, len(confirmed))
+        else:
+            log.debug("clip %s no confirmed continuations", cn)
 
+    log.info("similarity done video=%.8s elapsed=%.1fs", video_id, time.monotonic() - t0)
     return clips
 
 
@@ -115,10 +133,11 @@ Respond ONLY with a JSON object. No other text. No markdown fences.
 
         decision = json.loads(raw).get("decision", "noise")
         if decision not in ("stitch", "standalone", "noise"):
+            log.warning("LLM invalid decision=%.20s, mapping to noise", decision)
             return "noise"
         return decision
     except Exception as e:
-        print(f"[similarity] LLM classification error: {e}")
+        log.warning("LLM classification error: %s", e)
         return "noise"
 
 
@@ -137,5 +156,9 @@ def _write_related_segment(clip_id: str, related_chunk_id: str,
             """, (clip_id, related_chunk_id, similarity_score,
                   confirmed_by_llm, decision))
             conn.commit()
+            log.debug("related_segment saved decision=%s sim=%.3f confirmed=%s", decision, similarity_score, confirmed_by_llm)
+    except Exception:
+        log.exception("related_segment insert failed")
+        raise
     finally:
         release_conn(conn)

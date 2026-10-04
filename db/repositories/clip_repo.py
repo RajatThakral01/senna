@@ -8,6 +8,9 @@ Input:  Clip metadata produced by pipeline/analyzer.py (timestamps, hook, reason
 Output: Clip UUID strings; clip row dicts for report generation.
 """
 from db.connection import get_conn, release_conn
+import logging
+
+log = logging.getLogger("db.clip_repo")
 
 
 def insert_clip(video_id: str, clip_number: int, start_time: float, end_time: float,
@@ -28,6 +31,7 @@ def insert_clip(video_id: str, clip_number: int, start_time: float, end_time: fl
         hashtags_list = suggested_hashtags
     else:
         hashtags_list = []
+    log.debug("insert_clip video=%.8s no=%d %.1f-%.1f", video_id, clip_number, start_time, end_time)
 
     conn = get_conn()
     try:
@@ -46,13 +50,18 @@ def insert_clip(video_id: str, clip_number: int, start_time: float, end_time: fl
             ))
             clip_id = cur.fetchone()[0]
             conn.commit()
+            log.debug("insert_clip done id=%.8s no=%d", str(clip_id), clip_number)
             return str(clip_id)
+    except Exception:
+        log.exception("insert_clip failed no=%d", clip_number)
+        raise
     finally:
         release_conn(conn)
 
 
 def update_output_path(clip_id: str, output_path: str) -> None:
     """Store the rendered .mp4 path once FFmpeg finishes a clip."""
+    log.debug("update_output clip=%.8s path=%.80s", str(clip_id), output_path)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -61,26 +70,16 @@ def update_output_path(clip_id: str, output_path: str) -> None:
                 (output_path, clip_id)
             )
             conn.commit()
-    finally:
-        release_conn(conn)
-
-
-def update_embedding(clip_id: str, embedding: list) -> None:
-    """Write the embedding vector for a clip."""
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE clips SET embedding = %s WHERE id = %s",
-                (embedding, clip_id)
-            )
-            conn.commit()
+    except Exception:
+        log.exception("update_output failed clip=%.8s", str(clip_id))
+        raise
     finally:
         release_conn(conn)
 
 
 def get_clips_for_video(video_id: str) -> list:
     """Return all clips for a video ordered by clip_number."""
+    log.debug("get_clips video=%.8s", video_id)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -101,8 +100,16 @@ def get_clips_for_video(video_id: str) -> list:
                 d["id"] = str(d["id"])
                 d["video_id"] = str(d["video_id"])
                 if d.get("embedding"):
-                    d["embedding"] = json.loads(d["embedding"])
+                    try:
+                        d["embedding"] = json.loads(d["embedding"])
+                    except Exception:
+                        log.warning("clip embedding parse failed clip_no=%s", d.get("clip_number"))
+                        d["embedding"] = None
                 rows.append(d)
+            log.debug("get_clips video=%.8s count=%d", video_id, len(rows))
             return rows
+    except Exception:
+        log.exception("get_clips failed video=%.8s", video_id)
+        raise
     finally:
         release_conn(conn)

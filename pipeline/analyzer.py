@@ -5,11 +5,15 @@ Analyzes transcript chunks to identify viral short-form video clips.
 """
 
 import json
+import time
 import requests
+from logger import get_logger
 
 from config import LLM_API_KEY, LLM_MODEL, LLM_API_URL
 from db.repositories import chunk_repo, clip_repo
 from pipeline.embedder import embed_text
+
+log = get_logger("pipeline.analyzer")
 
 def format_time(seconds):
     hours = int(seconds // 3600)
@@ -68,11 +72,10 @@ def extract_json_from_response(raw_text):
         start = inside.rfind('[')
         end = inside.rfind(']')
         if start != -1 and end != -1 and end > start:
-            print("  (JSON found inside think block)")
+            log.debug("JSON found inside think block")
             return inside[start:end+1]
 
-    print("RAW TEXT THAT FAILED JSON EXTRACTION:")
-    print(raw_text)
+    log.error("JSON extraction failed raw_len=%d raw=%.500s", len(raw_text), raw_text)
     raise ValueError("JSON extraction failed")
 
 
@@ -80,17 +83,6 @@ def _extract_clips_from_chunk(chunk: dict, config: dict) -> list[dict]:
     """
     Send a single chunk's text to the LLM to extract 0-2 viral moments.
     """
-    
-    # Optional: build a timestamped text representation if word-level is available in chunk text,
-    # but the chunk dictionary in DB just has "text", "start_time", "end_time".
-    # For now we'll just give the LLM the text and overall timestamps, 
-    # and ask it to estimate timestamps or we just use the chunk's timestamps as a rough boundary.
-    # Actually, the user's prompt needs exact timestamps. Since the DB doesn't store word-level 
-    # timestamps for the chunk, wait, how can the LLM give exact timestamps?
-    # Let's provide the start and end time of the chunk so the LLM knows the bounds.
-    # Wait, the old code built a timestamped transcript. 
-    # We should probably pass the chunk text as is and ask for the hook.
-    
     prompt = f"""You are a viral short-form video expert for
 TikTok, Instagram Reels, and YouTube Shorts.
 
@@ -141,7 +133,10 @@ Return ONLY valid JSON array, no explanation:
 ]"""
 
     import time
-    
+
+    log.debug("extract chunk_idx=%s range=%.1f-%.1f chars=%d",
+              chunk.get("chunk_index"), chunk.get("start_time", 0),
+              chunk.get("end_time", 0), len(chunk.get("text", "")))
     max_retries = 3
     response = None
     for attempt in range(max_retries):
@@ -163,21 +158,25 @@ Return ONLY valid JSON array, no explanation:
             response.raise_for_status()
             break  # Success
         except requests.exceptions.RequestException as e:
-            print(f"  [analyzer] API request failed (attempt {attempt+1}/{max_retries}): {e}")
+            log.warning("analyzer API failed attempt %d/%d: %s", attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)  # Exponential backoff
             else:
+                log.error("analyzer API exhausted retries, returning []")
                 return []
 
     raw = response.json().get('choices', [{}])[0].get('message', {}).get('content', '')
     if not raw:
+        log.warning("analyzer empty LLM response")
         return []
-    
+
     try:
         raw = extract_json_from_response(raw)
         clips = json.loads(raw) if raw != '[]' else []
     except ValueError:
+        log.exception("analyzer JSON parse failed")
         return []
+    log.debug("analyzer LLM returned %d raw clips", len(clips))
 
     MIN_DURATION = 15
 
@@ -193,10 +192,11 @@ Return ONLY valid JSON array, no explanation:
                 clip['duration_seconds'] = dur
                 valid_clips.append(clip)
             else:
-                print(f"  Skipped short clip (only {int(dur)}s)")
+                log.debug("skip short clip %.0fs < %ds hook=%.40s", dur, MIN_DURATION, clip.get("hook", ""))
         except Exception as e:
-            print(f"  Skipped malformed clip timestamp: {e}")
+            log.warning("skip malformed clip timestamp: %s clip=%s", e, {k: clip.get(k) for k in ("start_time", "end_time")})
 
+    log.debug("extract done valid=%d/%d", len(valid_clips), len(clips))
     return valid_clips
 
 
@@ -207,10 +207,18 @@ def analyze(video_id: str, chunks: list[dict], config: dict) -> list[dict]:
     """
     all_clips = []
     clip_number = 1
+    t0 = time.monotonic()
+    log.info("analyze start video=%.8s chunks=%d", video_id, len(chunks))
 
     for chunk in chunks:
-        print(f"[analyzer] Analyzing chunk {chunk['chunk_index']} ({chunk['start_time']:.1f}s → {chunk['end_time']:.1f}s)")
-        chunk_clips = _extract_clips_from_chunk(chunk, config)
+        log.info("analyzing chunk %s (%.1fs → %.1fs)", chunk.get('chunk_index'),
+                 chunk.get('start_time', 0), chunk.get('end_time', 0))
+        try:
+            chunk_clips = _extract_clips_from_chunk(chunk, config)
+        except Exception:
+            log.exception("chunk extract crashed idx=%s", chunk.get("chunk_index"))
+            continue
+        log.info("chunk %s yielded %d clips", chunk.get("chunk_index"), len(chunk_clips))
 
         for clip in chunk_clips:
             clip["clip_number"] = clip_number
@@ -218,7 +226,11 @@ def analyze(video_id: str, chunks: list[dict], config: dict) -> list[dict]:
 
             # Embed the clip's hook immediately
             clip_text = f"{clip.get('hook', '')} {clip.get('reason', '')}"
-            clip["embedding"] = embed_text(clip_text)
+            try:
+                clip["embedding"] = embed_text(clip_text)
+            except Exception:
+                log.exception("clip embed failed clip_no=%d", clip["clip_number"])
+                raise
 
             # Write to DB
             clip_id = clip_repo.insert_clip(
@@ -240,9 +252,11 @@ def analyze(video_id: str, chunks: list[dict], config: dict) -> list[dict]:
             clip_number += 1
 
     # Deduplicate clips with overlapping timestamps (same moment found in two chunks)
+    before = len(all_clips)
     all_clips = _deduplicate_clips(all_clips, overlap_threshold_seconds=5.0)
 
-    print(f"[analyzer] Found {len(all_clips)} total clips across {len(chunks)} chunks")
+    log.info("analyze done video=%.8s clips=%d (dedup %d->%d) elapsed=%.1fs",
+             video_id, len(all_clips), before, len(all_clips), time.monotonic() - t0)
     
     # Save the deduplicated clips to clips_analysis.json for legacy compatibility
     import os
@@ -257,6 +271,7 @@ def analyze(video_id: str, chunks: list[dict], config: dict) -> list[dict]:
             if 'embedding' in safe_c: del safe_c['embedding']
             safe_clips.append(safe_c)
         json.dump(safe_clips, f, indent=2)
+    log.debug("wrote transcripts/clips_analysis.json clips=%d", len(safe_clips))
 
     return all_clips
 
@@ -267,7 +282,7 @@ def _deduplicate_clips(clips: list[dict], overlap_threshold_seconds: float) -> l
     Keeps the one with the longer duration (more context).
     """
     if not clips: return []
-    
+
     clips = sorted(clips, key=lambda c: to_sec(str(c["start_time"])))
     kept = []
 
@@ -283,7 +298,11 @@ def _deduplicate_clips(clips: list[dict], overlap_threshold_seconds: float) -> l
         if curr_start - last_start < overlap_threshold_seconds:
             # Duplicate — keep the longer one
             if clip.get("duration_seconds", 0) > last.get("duration_seconds", 0):
+                log.debug("dedup replace start=%.1f dur %.0f->%.0f", curr_start,
+                          last.get("duration_seconds", 0), clip.get("duration_seconds", 0))
                 kept[-1] = clip
+            else:
+                log.debug("dedup drop start=%.1f dur=%.0f", curr_start, clip.get("duration_seconds", 0))
         else:
             kept.append(clip)
 

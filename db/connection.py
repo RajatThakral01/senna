@@ -19,6 +19,9 @@ Usage:
 import os
 import psycopg2
 from psycopg2 import pool
+import logging
+
+_logger = logging.getLogger("db.connection")
 
 # pgvector registers its vector type with psycopg2 automatically on import
 try:
@@ -37,6 +40,7 @@ def get_pool():
     global _pool
     if _pool is None:
         cfg = get_config()["database"]
+        _logger.debug("init pool host=%s port=%s db=%s user=%s", cfg["host"], cfg.get("port"), cfg["name"], cfg["user"])
         conn_kwargs = dict(
             minconn=1,
             maxconn=10,
@@ -49,7 +53,12 @@ def get_pool():
         if cfg.get("password"):
             conn_kwargs["password"] = cfg["password"]
 
-        _pool = psycopg2.pool.ThreadedConnectionPool(**conn_kwargs)
+        try:
+            _pool = psycopg2.pool.ThreadedConnectionPool(**conn_kwargs)
+        except Exception:
+            _logger.exception("pool init failed host=%s db=%s", cfg["host"], cfg["name"])
+            raise
+        _logger.info("pool ready host=%s db=%s", cfg["host"], cfg["name"])
     return _pool
 
 

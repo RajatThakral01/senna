@@ -43,6 +43,12 @@ embeddings:
   input_type_storage: "passage"       # used when storing chunks/clips
   input_type_query: "query"           # used when searching (similarity.py)
 
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"                  # DEBUG/INFO/WARNING/ERROR — override via LOG_LEVEL
+  file: "logs/viral-clips.log"  # override via LOG_FILE; RotatingFileHandler 5MB x3
+  console: true                   # override via LOG_TO_CONSOLE=0 to silence stdout
+
 # ── Similarity Search ─────────────────────────────────────────────────────────
 similarity:
   top_k: 3

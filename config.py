@@ -3,16 +3,15 @@
 Configuration module for Viral Clips Automator.
 
 Exposes both:
-  - Legacy flat constants (AI_API_KEY, AI_MODEL, etc.) for backward compatibility.
-    These are aliased so existing modules (analyzer.py, campaign_parser.py, subtitler.py)
-    continue to work without changes to their import lines.
+  - Provider-agnostic LLM aliases (LLM_API_KEY, LLM_MODEL, LLM_API_URL) plus
+    WhisperX settings, used by pipeline modules.
   - get_config() — reads config.yaml and merges .env overrides, used by all new modules
     (db/connection.py, pipeline/chunker.py, pipeline/embedder.py, pipeline/similarity.py).
 
 Provider: NVIDIA NIM (OpenAI-compatible)
   Base URL:   https://integrate.api.nvidia.com/v1
   LLM model:  moonshotai/kimi-k2.6
-  Embed model: nvidia/llama-nemotron-embed-1b-v2
+  Embed model: nvidia/nv-embedqa-e5-v5
 """
 import os
 import yaml
@@ -28,7 +27,7 @@ NVIDIA_LLM_MODEL = "moonshotai/kimi-k2.6"
 NVIDIA_EMBED_MODEL = "nvidia/nv-embedqa-e5-v5"  # 1024-dim, fits pgvector HNSW index
 
 # ── Provider-agnostic LLM aliases (used by all pipeline modules) ─────────────
-# analyzer.py, campaign_parser.py, subtitler.py, similarity.py all do:
+# analyzer.py, campaign_parser.py, similarity.py all do:
 #   from config import LLM_API_KEY, LLM_MODEL, LLM_API_URL
 LLM_API_KEY = NVIDIA_API_KEY
 LLM_MODEL   = NVIDIA_LLM_MODEL
@@ -38,18 +37,6 @@ LLM_API_URL = f"{NVIDIA_BASE_URL}/chat/completions"
 WHISPER_MODEL    = "base"
 WHISPER_LANGUAGE = "en"
 WHISPER_DEVICE   = "cpu"
-
-# Clip settings
-MIN_CLIP_DURATION = 30
-MAX_CLIP_DURATION = 90
-NUM_CLIPS         = 3
-
-# Subtitle style (for FFmpeg)
-SUBTITLE_FONT          = "Arial"
-SUBTITLE_FONTSIZE      = 18
-SUBTITLE_COLOR         = "white"
-SUBTITLE_OUTLINE_COLOR = "black"
-SUBTITLE_OUTLINE_WIDTH = 2
 
 
 # ── New: get_config() reads config.yaml + env overrides ──────────────────────
@@ -64,7 +51,7 @@ def get_config() -> dict:
     with environment variable overrides applied for sensitive values.
 
     Returns a dict with keys: ffmpeg, paths, ai, defaults, database,
-    chunking, embeddings, similarity.
+    chunking, embeddings, similarity, logging.
     """
     global _cached_config
     if _cached_config is not None:
@@ -88,5 +75,8 @@ def get_config() -> dict:
         "chunking":   cfg["chunking"],
         "embeddings": cfg["embeddings"],
         "similarity": cfg["similarity"],
+        "logging":    cfg.get("logging", {"level": "INFO",
+                                          "file": "logs/viral-clips.log",
+                                          "console": True}),
     }
     return _cached_config

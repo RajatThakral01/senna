@@ -22,15 +22,18 @@ Rate limiting:
     requests (default 1.5s) and retries up to 3 times on 429 / rate-limit responses.
 
 Vector dimensions:
-    nvidia/llama-nemotron-embed-1b-v2 produces 4096-dimensional vectors.
-    The DB schema must have vector(4096) — see db/schema.sql.
+    nvidia/nv-embedqa-e5-v5 produces 1024-dimensional vectors.
+    The DB schema must have vector(1024) — see db/schema.sql.
 """
 
 import time
 import requests
+from logger import get_logger
 
 from config import NVIDIA_API_KEY, get_config
 from db.repositories import chunk_repo
+
+log = get_logger("pipeline.embedder")
 
 
 def embed_text(text: str, endpoint: str = None, model: str = None) -> list:
@@ -58,6 +61,7 @@ def embed_text(text: str, endpoint: str = None, model: str = None) -> list:
     endpoint = endpoint or cfg["endpoint"]
     model    = model    or cfg["model"]
     input_type = cfg.get("input_type_storage", "passage")
+    log.debug("embed_text chars=%d model=%s", len(text), model)
 
     max_retries = 3
     for attempt in range(max_retries):
@@ -80,19 +84,27 @@ def embed_text(text: str, endpoint: str = None, model: str = None) -> list:
         # 429 = rate limited
         if response.status_code == 429:
             wait_secs = 20 * (attempt + 1)
-            print(f"[embedder] Rate limited (attempt {attempt + 1}/{max_retries}) — waiting {wait_secs}s...")
+            log.warning("rate limited attempt %d/%d, waiting %ds", attempt + 1, max_retries, wait_secs)
             time.sleep(wait_secs)
             continue
 
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            log.exception("embeddings HTTP %d", response.status_code)
+            raise
         data = response.json()
 
         embeddings = data.get("data", [])
         if not embeddings:
+            log.error("empty embeddings response keys=%s", list(data.keys()))
             raise RuntimeError(f"Empty embeddings response: {data}")
 
-        return embeddings[0]["embedding"]
+        vec = embeddings[0]["embedding"]
+        log.debug("embed_text done dim=%d", len(vec))
+        return vec
 
+    log.error("embeddings rate limit exceeded after %d retries", max_retries)
     raise RuntimeError(f"Embeddings API rate limit exceeded after {max_retries} retries for text: {text[:60]}...")
 
 
@@ -114,22 +126,30 @@ def embed_all_chunks(video_id: str, chunks: list, delay_seconds: float = 1.5) ->
     total    = len(chunks)
     embedded = 0
     skipped  = 0
+    t0 = time.monotonic()
+    log.info("embed_all start video=%.8s total=%d", video_id, total)
 
     for chunk in chunks:
         if chunk.get("embedding"):
             skipped += 1
             continue   # already embedded — skip (idempotent re-run safety)
 
-        print(f"[embedder] Embedding chunk {chunk['chunk_index'] + 1}/{total} "
-              f"({chunk['start_time']:.1f}s → {chunk['end_time']:.1f}s) ...")
+        log.info("embedding chunk %d/%d (%.1fs → %.1fs)",
+                 chunk['chunk_index'] + 1, total, chunk['start_time'], chunk['end_time'])
 
-        vector = embed_text(chunk["text"])
+        try:
+            vector = embed_text(chunk["text"])
+        except Exception:
+            log.exception("embed failed chunk_idx=%s id=%.8s", chunk.get("chunk_index"), str(chunk.get("id")))
+            raise
         chunk_repo.update_embedding(chunk["id"], vector)
         chunk["embedding"] = vector
         embedded += 1
+        log.debug("embedded chunk_idx=%s dim=%d", chunk.get("chunk_index"), len(vector))
 
         if embedded < (total - skipped):
             time.sleep(delay_seconds)   # rate-limit guard between requests
 
-    print(f"[embedder] ✅ Done — embedded {embedded} chunks, skipped {skipped} (already done).")
+    log.info("embed_all done video=%.8s embedded=%d skipped=%d elapsed=%.1fs",
+             video_id, embedded, skipped, time.monotonic() - t0)
     return chunks

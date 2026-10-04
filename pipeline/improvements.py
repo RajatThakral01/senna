@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
 import subprocess
 import os
+import time
+from logger import get_logger
 
-def remove_silences(input_path, output_path):
-    cmd = [
-        os.path.expanduser('~/miniforge3/bin/ffmpeg'),
-        '-y', '-i', input_path,
-        '-af', (
-            'silenceremove='
-            'stop_periods=-1:'
-            'stop_duration=0.3:'
-            'stop_threshold=-35dB'
-        ),
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        output_path
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Silence removal error: {result.stderr[-300:]}")
-    else:
-        print(f"Silences removed: {output_path}")
+log = get_logger("pipeline.improvements")
 
 def add_fades(input_path, output_path, fade_duration=0.3):
+    log.info("fades start in=%.60s out=%.60s dur=%.2f", input_path, output_path, fade_duration)
+    t0 = time.monotonic()
     probe = subprocess.run([
         os.path.expanduser('~/miniforge3/bin/ffprobe'),
         '-v', 'error',
@@ -33,6 +19,7 @@ def add_fades(input_path, output_path, fade_duration=0.3):
 
     duration = float(probe.stdout.strip())
     fade_out_start = duration - fade_duration
+    log.debug("fades duration=%.2f out_start=%.2f", duration, fade_out_start)
 
     cmd = [
         os.path.expanduser('~/miniforge3/bin/ffmpeg'),
@@ -51,15 +38,17 @@ def add_fades(input_path, output_path, fade_duration=0.3):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Fade error: {result.stderr[-300:]}")
+        log.error("fades failed rc=%d err=%.300s", result.returncode, (result.stderr or "")[-300:])
     else:
-        print(f"Fades added: {output_path}")
+        log.info("fades done out=%s elapsed=%.1fs", output_path, time.monotonic() - t0)
 
 def apply_logo(input_path: str, output_path: str, logo_path: str, position: str = "top-right") -> str:
     """
     Overlays a logo PNG onto the video.
     Position options: top-right, top-left, bottom-right, bottom-left
     """
+    log.info("logo start in=%.60s logo=%.60s pos=%s", input_path, logo_path, position)
+    t0 = time.monotonic()
     position_map = {
         "top-right":    "W-w-20:20",
         "top-left":     "20:20",
@@ -67,7 +56,7 @@ def apply_logo(input_path: str, output_path: str, logo_path: str, position: str 
         "bottom-left":  "20:H-h-20"
     }
     overlay = position_map.get(position, "W-w-20:20")
-    
+
     cmd = [
         os.path.expanduser('~/miniforge3/bin/ffmpeg'),
         "-i", input_path, "-i", logo_path,
@@ -77,10 +66,10 @@ def apply_logo(input_path: str, output_path: str, logo_path: str, position: str 
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Logo application error: {result.stderr[-300:]}")
+        log.error("logo failed rc=%d err=%.300s, keeping original", result.returncode, (result.stderr or "")[-300:])
         return input_path # Return original path on failure
     else:
-        print(f"Logo applied: {output_path}")
+        log.info("logo done out=%s elapsed=%.1fs", output_path, time.monotonic() - t0)
         return output_path
 
 def mix_music(input_path: str, output_path: str, music_path: str, music_volume: float = 0.3) -> str:
@@ -88,6 +77,8 @@ def mix_music(input_path: str, output_path: str, music_path: str, music_volume: 
     Mixes background music under the original video audio.
     music_volume: 0.0 to 1.0, where 1.0 = original speech volume
     """
+    log.info("music start in=%.60s music=%.60s vol=%.2f", input_path, music_path, music_volume)
+    t0 = time.monotonic()
     cmd = [
         os.path.expanduser('~/miniforge3/bin/ffmpeg'),
         "-i", input_path,
@@ -102,8 +93,8 @@ def mix_music(input_path: str, output_path: str, music_path: str, music_volume: 
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"Music mixing error: {result.stderr[-300:]}")
+        log.error("music failed rc=%d err=%.300s, keeping original", result.returncode, (result.stderr or "")[-300:])
         return input_path # Return original path on failure
     else:
-        print(f"Music mixed: {output_path}")
+        log.info("music done out=%s elapsed=%.1fs", output_path, time.monotonic() - t0)
         return output_path

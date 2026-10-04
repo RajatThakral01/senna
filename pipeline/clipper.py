@@ -1,6 +1,10 @@
 # clipper.py
 import subprocess
 import os
+import time
+from logger import get_logger
+
+log = get_logger("pipeline.clipper")
 
 def time_to_seconds(time_str):
     """Converts HH:MM:SS or float to total seconds."""
@@ -51,17 +55,21 @@ def cut_clips(video_path, clips, output_dir="clips"):
     Returns list of clip file paths.
     """
     clip_paths = []
+    t0 = time.monotonic()
+    log.info("cut_clips start video_src=%.80s clips=%d out_dir=%s", video_path, len(clips), output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     for clip in clips:
         clip_num = clip["clip_number"]
         ranges = get_time_ranges_for_clip(clip)
         output_path = os.path.join(output_dir, f"clip_{clip_num}.mp4")
 
-        print(f"✂️   Cutting clip {clip_num}: {len(ranges)} segment(s)")
+        log.info("cutting clip %d: %d segment(s) ranges=%s", clip_num, len(ranges), [(round(a, 1), round(b, 1)) for a, b in ranges])
         
         ffmpeg_path = os.path.expanduser("~/miniforge3/bin/ffmpeg")
         if not os.path.exists(ffmpeg_path):
             ffmpeg_path = "ffmpeg" # fallback to system ffmpeg
+        log.debug("clip %d ffmpeg=%s", clip_num, ffmpeg_path)
 
         cmd = [ffmpeg_path, "-y"]
         
@@ -98,9 +106,11 @@ def cut_clips(video_path, clips, output_dir="clips"):
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"❌ Error cutting clip {clip_num}: {result.stderr[-200:]}")
+            log.error("cut clip %d failed rc=%d err=%.300s", clip_num, result.returncode, result.stderr[-300:] if result.stderr else "")
             continue
-            
+
+        size = os.path.getsize(output_path) if os.path.exists(output_path) else -1
+        log.info("clip %d saved path=%s bytes=%d", clip_num, output_path, size)
         clip_paths.append({
             "clip_number": clip_num,
             "path": output_path,
@@ -111,6 +121,7 @@ def cut_clips(video_path, clips, output_dir="clips"):
             "suggested_hashtags": clip.get("suggested_hashtags", ""),
             "reason": clip.get("reason", "")
         })
-        print(f"✅  Clip {clip_num} saved: {output_path}")
+        log.debug("clip %d meta hook=%.40s", clip_num, clip.get("hook", ""))
 
+    log.info("cut_clips done ok=%d/%d elapsed=%.1fs", len(clip_paths), len(clips), time.monotonic() - t0)
     return clip_paths

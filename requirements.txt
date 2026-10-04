@@ -1,5 +1,7 @@
 yt-dlp
-openai-whisper
+whisperx
+librosa
+numpy
 requests
 gdown
 gradio
@@ -7,3 +9,4 @@ pyyaml
 python-dotenv
 psycopg2-binary>=2.9.9
 pgvector>=0.2.5
+pytest

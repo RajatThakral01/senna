@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import json
 import os
+from logger import get_logger
+
+log = get_logger("pipeline.regen_srt")
 
 def sec_to_srt_time(sec):
     """Convert seconds to SRT time format HH:MM:SS,mmm."""
@@ -11,6 +14,7 @@ def sec_to_srt_time(sec):
 
 def generate_srt_for_clip(transcript_segments, clip_start, clip_end, clip_num):
     """Generate SRT content for a clip time range."""
+    log.debug("srt gen clip=%s range=%.1f-%.1f segs=%d", clip_num, clip_start, clip_end, len(transcript_segments))
     words = []
     for seg in transcript_segments:
         if 'words' in seg:
@@ -29,7 +33,11 @@ def generate_srt_for_clip(transcript_segments, clip_start, clip_end, clip_num):
         srt_lines.append(text)
         srt_lines.append("")
 
-    return '\n'.join(srt_lines)
+    out = '\n'.join(srt_lines)
+    log.debug("srt gen clip=%s words=%d bytes=%d", clip_num, len(words), len(out))
+    if not words:
+        log.warning("srt gen clip=%s no words in range", clip_num)
+    return out
 
 def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,7 +59,7 @@ def main():
         srt_path = f"clips/clip_{clip['num']}.srt"
         with open(srt_path, 'w', encoding='utf-8') as f:
             f.write(srt_content)
-        print(f"Generated {srt_path} ({len(srt_content)} bytes)")
+        log.info("generated %s bytes=%d", srt_path, len(srt_content))
 
 if __name__ == '__main__':
     main()

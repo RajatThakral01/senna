@@ -22,18 +22,18 @@ class TestInputHandler(unittest.TestCase):
         self.assertEqual(input_handler.detect_source_type("invalid_input"), "unknown")
         print("✅ detect_source_type tests passed!")
 
-    @patch('input.input_handler.download_youtube_video')
+    @patch('input.input_handler._handle_youtube')
     def test_handle_input_youtube(self, mock_download):
         print("Testing handle_input with YouTube URL...")
         input_handler.handle_input("https://www.youtube.com/watch?v=123")
-        mock_download.assert_called_once_with("https://www.youtube.com/watch?v=123", "input/raw_video.mp4")
+        mock_download.assert_called_once_with("https://www.youtube.com/watch?v=123")
         print("✅ YouTube handler called correctly.")
 
-    @patch('input.input_handler.download_live_stream')
+    @patch('input.input_handler._handle_youtube_live')
     def test_handle_input_youtube_live(self, mock_download):
         print("Testing handle_input with YouTube Live URL...")
         input_handler.handle_input("https://www.youtube.com/live/123")
-        mock_download.assert_called_once_with("https://www.youtube.com/live/123", "input/raw_video.mp4")
+        mock_download.assert_called_once_with("https://www.youtube.com/live/123")
         print("✅ YouTube Live handler called correctly.")
 
     @patch('input.input_handler.download_from_drive')

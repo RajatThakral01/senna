@@ -29,8 +29,12 @@ Chunking Strategy (three layers applied in order):
 """
 
 import json
+import time
+from logger import get_logger, log_stage
 from config import get_config
 from db.repositories import chunk_repo
+
+log = get_logger("pipeline.chunker")
 
 SENTENCE_ENDINGS = {'.', '!', '?'}
 
@@ -75,7 +79,7 @@ def _load_words(transcript_path: str) -> list:
     valid = [w for w in words if "start" in w and "end" in w]
     skipped = len(words) - len(valid)
     if skipped:
-        print(f"[chunker] ⚠️  Skipped {skipped} words with missing timestamps")
+        log.warning("skipped %d words with missing timestamps", skipped)
 
     return valid
 
@@ -97,12 +101,16 @@ def build_chunks(transcript_path: str, video_id: str) -> list:
     max_tokens        = cfg["max_tokens_per_chunk"]
     overlap_seconds   = cfg["overlap_seconds"]
     min_duration      = cfg["min_chunk_duration_seconds"]
+    t0 = time.monotonic()
+    log.info("chunk start video=%.8s path=%s silence_thr=%.2f max_tokens=%d overlap=%ds min_dur=%ds",
+             video_id, transcript_path, silence_threshold, max_tokens, overlap_seconds, min_duration)
 
     words = _load_words(transcript_path)
     if not words:
+        log.error("no usable words in transcript path=%s", transcript_path)
         raise ValueError(f"No usable words found in transcript at {transcript_path}")
 
-    print(f"[chunker] Loaded {len(words)} words from transcript")
+    log.info("loaded %d words", len(words))
 
     # ── Step A + B: Silence-gap detection + Semantic validation ──────────────
     cut_indices = []  # word indices where a NEW chunk starts (exclusive upper bound of prev chunk)
@@ -167,7 +175,7 @@ def build_chunks(transcript_path: str, video_id: str) -> list:
         duration   = end_time - start_time
 
         if duration < min_duration:
-            print(f"[chunker] Skipping short chunk ({duration:.1f}s < {min_duration}s)")
+            log.debug("skip short chunk %.1fs < %ss", duration, min_duration)
             continue
 
         text = " ".join(w["word"] for w in chunk_words)
@@ -187,7 +195,7 @@ def build_chunks(transcript_path: str, video_id: str) -> list:
             "words":              chunk_words,   # kept in memory only, not stored in DB
         })
 
-    print(f"[chunker] Raw chunks before overlap: {len(raw_chunks)}")
+    log.info("raw chunks=%d cuts=%d", len(raw_chunks), len(final_cuts))
 
     # ── Step D: Sliding Window Overlap ────────────────────────────────────────
     final_chunks = []
@@ -239,6 +247,9 @@ def build_chunks(transcript_path: str, video_id: str) -> list:
         )
         chunk["id"] = chunk_id
         db_chunks.append(chunk)
+        log.debug("chunk saved idx=%d id=%.8s %.1fs->%.1fs tokens=%d overlap=%s",
+                  chunk["chunk_index"], str(chunk_id), chunk["start_time"],
+                  chunk["end_time"], chunk["token_count"], chunk["is_overlap_tail"])
 
-    print(f"[chunker] ✅ Produced {len(db_chunks)} chunks for video {video_id}")
+    log.info("chunk done video=%.8s chunks=%d elapsed=%.1fs", video_id, len(db_chunks), time.monotonic() - t0)
     return db_chunks
