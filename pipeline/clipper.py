@@ -3,6 +3,7 @@ import subprocess
 import os
 import time
 from logger import get_logger
+from config import ffmpeg_path as _ffmpeg_path
 
 log = get_logger("pipeline.clipper")
 
@@ -66,9 +67,7 @@ def cut_clips(video_path, clips, output_dir="clips"):
 
         log.info("cutting clip %d: %d segment(s) ranges=%s", clip_num, len(ranges), [(round(a, 1), round(b, 1)) for a, b in ranges])
         
-        ffmpeg_path = os.path.expanduser("~/miniforge3/bin/ffmpeg")
-        if not os.path.exists(ffmpeg_path):
-            ffmpeg_path = "ffmpeg" # fallback to system ffmpeg
+        ffmpeg_path = _ffmpeg_path()
         log.debug("clip %d ffmpeg=%s", clip_num, ffmpeg_path)
 
         cmd = [ffmpeg_path, "-y"]

@@ -9,4 +9,5 @@ pyyaml
 python-dotenv
 psycopg2-binary>=2.9.9
 pgvector>=0.2.5
+sentence-transformers>=2.2.0
 pytest

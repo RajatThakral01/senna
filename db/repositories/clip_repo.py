@@ -113,3 +113,56 @@ def get_clips_for_video(video_id: str) -> list:
         raise
     finally:
         release_conn(conn)
+
+
+def get_confirmed_segments_for_video(video_id: str) -> dict:
+    """Return {clip_id: [chunk dicts]} for LLM-confirmed (stitch) continuations.
+
+    Chunk dicts carry id/start_time/end_time/text — exactly what
+    pipeline.clipper.get_time_ranges_for_clip() reads from
+    clip["related_segments"].
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.clip_id, ch.id, ch.start_time, ch.end_time, ch.text
+                FROM related_segments r
+                JOIN clips c  ON c.id = r.clip_id
+                JOIN chunks ch ON ch.id = r.related_chunk_id
+                WHERE c.video_id = %s AND r.confirmed_by_llm = TRUE
+                ORDER BY ch.start_time ASC
+            """, (video_id,))
+            out = {}
+            for clip_id, chunk_id, start, end, text in cur.fetchall():
+                out.setdefault(str(clip_id), []).append({
+                    "id": str(chunk_id),
+                    "start_time": start,
+                    "end_time": end,
+                    "text": text,
+                })
+            log.debug("confirmed segments video=%.8s clips=%d", video_id, len(out))
+            return out
+    except Exception:
+        log.exception("confirmed segments failed video=%.8s", video_id)
+        raise
+    finally:
+        release_conn(conn)
+
+
+def mark_segments_stitched(clip_id: str) -> None:
+    """Flag confirmed segments of a clip as consumed by the FFmpeg stitch."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE related_segments
+                SET stitched_into_clip = TRUE
+                WHERE clip_id = %s AND confirmed_by_llm = TRUE
+            """, (clip_id,))
+            conn.commit()
+    except Exception:
+        log.exception("mark stitched failed clip=%.8s", str(clip_id))
+        raise
+    finally:
+        release_conn(conn)

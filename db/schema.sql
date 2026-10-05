@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     token_count         INT,
     is_overlap_tail     BOOLEAN DEFAULT FALSE,      -- TRUE if this chunk is a re-attached overlap region
     silence_gap_before  FLOAT,                     -- seconds of silence before this chunk starts
-    embedding           vector(1024),               -- NVIDIA nv-embedqa-e5-v5 embedding; NULL until embedder runs
+    embedding           vector(1024),               -- Qwen3-Embedding-0.6B local embedding; NULL until embedder runs
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS clips (
     suggested_title     TEXT,
     suggested_hashtags  TEXT[],
     source_chunk_ids    UUID[],                    -- which chunk(s) the LLM was reading when it found this
-    embedding           vector(1024),               -- embedding of the clip's hook+text
+    embedding           vector(1024),               -- embedding of the clip's hook+text (Qwen3-Embedding-0.6B, query prompt)
     output_path         TEXT,                       -- path to final rendered .mp4, null until rendering
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );

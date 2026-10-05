@@ -56,7 +56,7 @@ Match mentioned assets to available files. If a specific file is not mentioned
 but a type is (e.g., "add logo"), use the first available one.
 Return only the JSON config.
 """
-    if not LLM_API_KEY or LLM_API_KEY == "your_nvidia_api_key_here":
+    if not LLM_API_KEY or LLM_API_KEY in ("your_groq_api_key_here", "your_grok_api_key_here", "your_nvidia_api_key_here", "your_minimax_api_key_here"):
         log.warning("LLM key missing, returning mock campaign config")
         # Return a mock response for testing without a real API key
         mock_config = {

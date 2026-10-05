@@ -22,7 +22,7 @@ log = get_logger("pipeline.similarity")
 
 
 def find_related_segments(video_id: str, clips: list[dict],
-                           top_k: int = 3, threshold: float = 0.80) -> list[dict]:
+                           top_k: int = 3, threshold: float = 0.50) -> list[dict]:
     """
     Main entry point.
     For each clip, run a pgvector similarity search against all chunks of the same video.
@@ -55,11 +55,12 @@ def find_related_segments(video_id: str, clips: list[dict],
 
         confirmed = []
         for rel_chunk in related:
-            log.debug("clip %s LLM-confirm chunk %.1f-%.1f sim=%.3f", cn,
-                      rel_chunk.get("start_time", 0), rel_chunk.get("end_time", 0),
-                      rel_chunk.get("similarity", 0))
             decision = _llm_confirm_continuation(clip, rel_chunk)
-            log.debug("clip %s decision=%s sim=%.3f", cn, decision, rel_chunk.get("similarity", 0))
+            # Tuning line: similarity score + LLM verdict per candidate
+            log.info("clip %s candidate chunk_idx=%s sim=%.4f decision=%s range=%.1f-%.1f",
+                     cn, rel_chunk.get("chunk_index"),
+                     rel_chunk.get("similarity", 0), decision,
+                     rel_chunk.get("start_time", 0), rel_chunk.get("end_time", 0))
 
             _write_related_segment(
                 clip_id=clip["id"],
@@ -113,32 +114,48 @@ Classify the relationship between the candidate and the clip using exactly one o
 Respond ONLY with a JSON object. No other text. No markdown fences.
 {{"decision": "stitch"}} or {{"decision": "standalone"}} or {{"decision": "noise"}}"""
 
-    try:
-        response = requests.post(
-            LLM_API_URL,
-            headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": LLM_MODEL,
-                "temperature": 0.1,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        raw = response.json()["choices"][0]["message"]["content"]
+    max_retries = 4
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                LLM_API_URL,
+                headers={"Authorization": f"Bearer {LLM_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model": LLM_MODEL,
+                    "temperature": 0.1,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=30,
+            )
+            # 429 = Groq rate limit — back off and retry (free-tier bursts)
+            if response.status_code == 429:
+                wait = 10 * (attempt + 1)
+                log.warning("LLM 429 rate-limited attempt %d/%d, waiting %ds",
+                            attempt + 1, max_retries, wait)
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            raw = response.json()["choices"][0]["message"]["content"]
 
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            raw = re.sub(r"```json|```", "", raw).strip()
+            if not raw:
+                log.warning("LLM empty classification response, mapping to noise")
+                return "noise"
 
-        decision = json.loads(raw).get("decision", "noise")
-        if decision not in ("stitch", "standalone", "noise"):
-            log.warning("LLM invalid decision=%.20s, mapping to noise", decision)
-            return "noise"
-        return decision
-    except Exception as e:
-        log.warning("LLM classification error: %s", e)
-        return "noise"
+            decision = json.loads(raw).get("decision", "noise")
+            if decision not in ("stitch", "standalone", "noise"):
+                log.warning("LLM invalid decision=%.20s, mapping to noise", decision)
+                return "noise"
+            return decision
+        except requests.exceptions.RequestException as e:
+            log.warning("LLM classification error attempt %d/%d: %s",
+                        attempt + 1, max_retries, e)
+            if attempt < max_retries - 1:
+                time.sleep(5 * (attempt + 1))
+    log.warning("LLM classification exhausted retries, mapping to noise")
+    return "noise"
 
 
 def _write_related_segment(clip_id: str, related_chunk_id: str,

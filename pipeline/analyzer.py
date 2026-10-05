@@ -224,10 +224,11 @@ def analyze(video_id: str, chunks: list[dict], config: dict) -> list[dict]:
             clip["clip_number"] = clip_number
             clip["source_chunk_ids"] = [chunk["id"]]
 
-            # Embed the clip's hook immediately
+            # Embed the clip's hook immediately (query prompt: clips are used
+            # as similarity queries against stored chunk/document embeddings)
             clip_text = f"{clip.get('hook', '')} {clip.get('reason', '')}"
             try:
-                clip["embedding"] = embed_text(clip_text)
+                clip["embedding"] = embed_text(clip_text, prompt_name="query")
             except Exception:
                 log.exception("clip embed failed clip_no=%d", clip["clip_number"])
                 raise

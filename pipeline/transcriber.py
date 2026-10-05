@@ -57,6 +57,25 @@ def transcribe_audio(audio_path, output_dir="transcripts"):
     nwords = sum(len(s.get("words", [])) for s in result.get("segments", []))
     log.info("aligned segments=%d words=%d", len(result.get("segments", [])), nwords)
 
+    # Free WhisperX GPU memory before downstream stages (embeddings need VRAM)
+    try:
+        del model
+    except NameError:
+        pass
+    try:
+        del model_a
+    except NameError:
+        pass
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    log.debug("freed WhisperX GPU memory")
+
     # Save transcript to JSON
     transcript_path = os.path.join(output_dir, "transcript.json")
     with open(transcript_path, "w", encoding="utf-8") as f:

@@ -34,3 +34,28 @@ def insert_video(source_url: str, raw_path: str, campaign_id: str = None,
     finally:
         release_conn(conn)
 
+
+def get_video(video_id: str) -> dict | None:
+    """Return the video row as a dict, or None if the id does not exist."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, source_url, raw_path, duration_seconds,
+                       status, campaign_id, created_at, updated_at
+                FROM videos
+                WHERE id = %s
+            """, (video_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = [d[0] for d in cur.description]
+            d = dict(zip(cols, row))
+            d["id"] = str(d["id"])
+            return d
+    except Exception:
+        log.exception("get_video failed video=%.8s", video_id)
+        raise
+    finally:
+        release_conn(conn)
+

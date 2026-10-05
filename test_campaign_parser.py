@@ -39,7 +39,7 @@ class TestCampaignParser(unittest.TestCase):
         assets = {"logos": ["logo.png"], "music": []}
         
         # Ensure no API key is set, so the internal mock is used
-        with patch.dict(os.environ, {"MINIMAX_API_KEY": "your_minimax_api_key_here"}):
+        with patch.dict(os.environ, {"GROK_API_KEY": "your_grok_api_key_here"}):
             config = campaign_parser.parse_campaign(description, assets)
 
         self.assertIn("campaign_id", config)
