@@ -27,7 +27,7 @@ from logger import get_logger
 
 log = get_logger("pipeline.editplan")
 
-PLAN_VERSION = 1
+PLAN_VERSION = 2  # v2: framing block (scene crops, manual ROI, content bounds, needs_review)
 
 
 def plan_fingerprint(settings: dict) -> str:
@@ -37,8 +37,13 @@ def plan_fingerprint(settings: dict) -> str:
 
 def build_edit_plan(clip, campaign_config=None, config=None,
                     framing_analysis=None, caption_data=None,
-                    source_info=None):
-    """Assemble the edit plan dict for one clip. Pure (no IO)."""
+                    source_info=None, framing_plan=None):
+    """Assemble the edit plan dict for one clip. Pure (no IO).
+
+    framing_plan: render_vertical() result dict (scene_plan, content_bounds,
+    needs_review, manual_rois). Manual ROIs from a previous plan version are
+    preserved verbatim (user overrides are authoritative).
+    """
     config = config or {}
     campaign_config = campaign_config or {}
     framing_cfg = config.get("framing", {})
@@ -73,7 +78,8 @@ def build_edit_plan(clip, campaign_config=None, config=None,
                       "max_duration", "font", "font_size", "placement")},
         "framing": {k: framing_cfg.get(k) for k in
                     ("sample_interval", "deadzone_ratio", "smooth_factor",
-                     "headroom_ratio", "max_zoom", "branded_background")},
+                     "headroom_ratio", "max_zoom", "branded_background",
+                     "full_screen_vertical", "work_area", "min_face_fraction")},
         "audio": audio_cfg,
         "export": exp_cfg,
         "fades": fades_cfg,
@@ -84,6 +90,15 @@ def build_edit_plan(clip, campaign_config=None, config=None,
         "fade": campaign_config.get("fade", True),
     }
     src = source_info or {}
+    framing_plan = framing_plan or {}
+    # Manual ROIs survive across plan versions (authoritative user overrides).
+    manual_rois = list(framing_plan.get("manual_rois") or [])
+    if not manual_rois and isinstance(clip.get("manual_rois"), list):
+        manual_rois = list(clip["manual_rois"])
+    scene_plan = framing_plan.get("scene_plan") or []
+    content_bounds = (framing_plan.get("content_bounds")
+                      or (framing_analysis or {}).get("content_bounds"))
+    needs_review = bool(framing_plan.get("needs_review", False))
     cap_style_keys = ("font", "font_size", "primary_color",
                       "highlight_color", "outline_color", "outline_width",
                       "shadow", "margin_v", "margin_v_top", "max_lines")
@@ -104,6 +119,20 @@ def build_edit_plan(clip, campaign_config=None, config=None,
         "layout": clip.get("layout", "auto"),
         "layout_reason": clip.get("layout_reason", ""),
         "face_fraction": face_frac,
+        "framing": {
+            "full_screen_vertical": bool(framing_cfg.get("full_screen_vertical", True)),
+            "layout": clip.get("layout", "auto"),
+            "layout_reason": clip.get("layout_reason", ""),
+            "scene_crops": scene_plan,
+            "scene_count": len(scene_plan),
+            "manual_rois": manual_rois,
+            "content_bounds": content_bounds,
+            "face_fraction": face_frac,
+            "needs_review": needs_review,
+            "review_note": ("heuristic crop (work-area/centre/retained) covers "
+                            "part of this clip; verify subject framing"
+                            if needs_review else ""),
+        },
         "audio": {
             "normalize_loudness": audio_cfg.get("normalize_loudness", True),
             "peak_limit_db": audio_cfg.get("peak_limit_db", -1.5),

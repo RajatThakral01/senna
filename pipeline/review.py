@@ -193,10 +193,74 @@ def _drop_clip_final(clip_id):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT output_path FROM clips WHERE id=%s", (clip_id,))
+            cur.execute("SELECT output_path FROM clips WHERE id = %s", (clip_id,))
             row = cur.fetchone()
             conn.commit()
     finally:
         release_conn(conn)
     if row:
         _drop_final(row[0])
+
+
+def get_manual_rois(clip_id: str) -> list:
+    """Manual crop ROIs from the latest edit plan (authoritative at render)."""
+    from db.repositories import editplan_repo
+    import json as _json
+    try:
+        plan_row = editplan_repo.get_latest_plan(clip_id)
+    except Exception:
+        return []
+    if not plan_row:
+        return []
+    plan = plan_row["plan"] if isinstance(plan_row["plan"], dict) else {}
+    if isinstance(plan, str):
+        try:
+            plan = _json.loads(plan)
+        except ValueError:
+            return []
+    rois = ((plan.get("framing") or {}).get("manual_rois") or [])
+    return [r for r in rois if isinstance(r, dict)]
+
+
+def apply_crop_override(clip_id: str, x, y, w, h,
+                        t_start=None, t_end=None) -> dict:
+    """Pin a manual 9:16 crop rectangle (source pixels) for a shot/time range.
+
+    Persisted into the edit plan (new version) and authoritative at render:
+    detection confidence never overrides it. Whole clip when t_start/t_end
+    are omitted. Clears the clip final so re-render runs. Returns the ROI.
+    """
+    from pipeline.framing import validate_roi
+    from db.repositories import editplan_repo
+    roi = {"x": x, "y": y, "w": w, "h": h}
+    if t_start is not None:
+        roi["t_start"] = t_start
+    if t_end is not None:
+        roi["t_end"] = t_end
+    roi = validate_roi(roi)  # raises on bad ratio / nonsense values
+    plan_row = editplan_repo.get_latest_plan(clip_id)
+    if not plan_row:
+        raise ValueError("no edit plan for clip (render it once first)")
+    plan = plan_row["plan"] if isinstance(plan_row["plan"], dict) else {}
+    import json as _json
+    if isinstance(plan, str):
+        plan = _json.loads(plan)
+    framing = plan.setdefault("framing", {})
+    rois = framing.setdefault("manual_rois", [])
+    # replace an identical time-range entry; otherwise append (last wins)
+    replaced = False
+    for i, old in enumerate(rois):
+        if (old.get("t_start") == roi.get("t_start")
+                and old.get("t_end") == roi.get("t_end")):
+            rois[i] = roi
+            replaced = True
+            break
+    if not replaced:
+        rois.append(roi)
+    framing["needs_review"] = False
+    framing["review_note"] = "manual crop override active"
+    editplan_repo.save_plan(plan_row.get("video_id") or _clip_video(clip_id),
+                            clip_id, plan)
+    _drop_clip_final(clip_id)
+    log.info("crop override clip=%s roi=%s replaced=%s", clip_id, roi, replaced)
+    return roi

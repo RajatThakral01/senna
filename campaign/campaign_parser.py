@@ -26,7 +26,7 @@ JSON schema:
   "music_volume": "float between 0.1-0.5 (default 0.3 if music mentioned, else null)",
   "split_screen": "boolean (true only if explicitly mentioned)",
   "split_screen_source": "null always for now",
-  "layout": "auto | speaker_crop | stacked_split | branded_fit (default auto; use stacked_split only if user asks for split-screen/stacked, speaker_crop for face-tracked crop, branded_fit for full-frame-on-brand-colour)",
+  "layout": "auto | speaker_crop | stacked_split | center_crop | branded_fit (default auto; stacked_split only for split-screen/stacked, speaker_crop for face-tracked crop, center_crop for static centre crop, branded_fit only when the user explicitly wants a fitted frame — it renders as a crop while full_screen_vertical is on)",
   "subtitles": "boolean (default true unless user says no subtitles)",
   "subtitle_style": "karaoke | standard | null",
   "aspect_ratio": "9:16 | 16:9 | 1:1 (default 9:16)",
@@ -162,7 +162,8 @@ Return only the JSON config.
     return config
 
 
-SUPPORTED_LAYOUTS = ("auto", "speaker_crop", "stacked_split", "branded_fit")
+SUPPORTED_LAYOUTS = ("auto", "speaker_crop", "stacked_split", "center_crop",
+                     "branded_fit")
 
 
 def validate_campaign_config(config: dict) -> dict:

@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from pipeline.review import (validate_boundary, apply_boundary_edit,
                              apply_layout_override, apply_caption_text,
-                             set_candidate_status)
+                             set_candidate_status, apply_crop_override,
+                             get_manual_rois)
 
 
 @pytest.fixture()
@@ -114,3 +115,40 @@ class TestSelectiveRender:
         import inspect
         from main import render_clips
         assert "clip_numbers" in inspect.signature(render_clips).parameters
+
+
+class TestCropOverride:
+    def _plan(self, vid, cid):
+        from db.repositories import editplan_repo
+        editplan_repo.save_plan(vid, cid, {
+            "clip_number": 1, "framing": {},
+            "captions": {"placement": "bottom", "cues": []}})
+
+    def test_crop_override_ok(self, clip_row):
+        vid, cid = clip_row
+        self._plan(vid, cid)
+        roi = apply_crop_override(cid, 100, 50, 540, 960)
+        assert roi["x"] == 100 and roi["w"] == 540
+        assert get_manual_rois(cid) == [roi]
+
+    def test_crop_override_bad_ratio(self, clip_row):
+        vid, cid = clip_row
+        self._plan(vid, cid)
+        with pytest.raises(ValueError, match="9:16"):
+            apply_crop_override(cid, 0, 0, 640, 480)
+
+    def test_crop_override_time_range(self, clip_row):
+        vid, cid = clip_row
+        self._plan(vid, cid)
+        roi = apply_crop_override(cid, 0, 0, 540, 960,
+                                  t_start=1.0, t_end=5.0)
+        assert roi["t_start"] == 1.0 and roi["t_end"] == 5.0
+        # same window overwritten, not duplicated
+        apply_crop_override(cid, 10, 10, 540, 960,
+                            t_start=1.0, t_end=5.0)
+        assert len(get_manual_rois(cid)) == 1
+
+    def test_crop_no_plan(self, clip_row):
+        vid, cid = clip_row
+        with pytest.raises(ValueError, match="no edit plan"):
+            apply_crop_override(cid, 0, 0, 540, 960)

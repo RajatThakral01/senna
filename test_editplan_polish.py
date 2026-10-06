@@ -29,12 +29,26 @@ def _cfg():
 class TestPlan:
     def test_structure(self):
         plan = build_edit_plan(_clip(), {}, _cfg())
-        assert plan["plan_version"] == 1
+        assert plan["plan_version"] == 2
         assert plan["output_duration"] == 30.0
         assert plan["export"]["width"] == 1080
         assert "does NOT restore detail" in plan["export"]["detail_note"]
         assert plan["audio"]["audio_fade"] is False
         assert plan["config_fingerprint"]
+        assert plan["framing"]["full_screen_vertical"] is True
+        assert plan["framing"]["manual_rois"] == []
+        assert plan["framing"]["needs_review"] is False
+
+    def test_framing_plan_carried(self):
+        fp = {"scene_plan": [{"t0": 0.0, "t1": 5.0, "kind": "face",
+                              "needs_review": False}],
+              "content_bounds": {"x": 0, "y": 0, "w": 1280, "h": 720},
+              "needs_review": True,
+              "manual_rois": [{"x": 0, "y": 0, "w": 405, "h": 720}]}
+        plan = build_edit_plan(_clip(), {}, _cfg(), framing_plan=fp)
+        assert plan["framing"]["scene_crops"] == fp["scene_plan"]
+        assert plan["framing"]["needs_review"] is True
+        assert plan["framing"]["manual_rois"] == fp["manual_rois"]
 
     def test_fingerprint_sensitive(self):
         a = build_edit_plan(_clip(), {}, _cfg())

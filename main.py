@@ -184,9 +184,9 @@ def render_clips(video_id: str, raw_video_path: str = None,
                  clip_numbers: list = None):
     """Render stage (step 9 of the pipeline).
 
-    Cut + stitch clips → face-aware 9:16 vertical (auto/speaker_crop/
-    stacked_split/branded_fit) → karaoke subtitles → logo →
-    music → fades (speech fade-out off by default) →
+    Cut + stitch clips → full-screen 9:16 vertical crop (auto/speaker_crop/
+    stacked_split/center_crop; letterbox-free under full_screen_vertical) →
+    karaoke subtitles → logo → music → fades (speech fade-out off by default) →
     output/clip_N_final.mp4, then output/report.json.
 
     Args:
@@ -300,30 +300,45 @@ def render_clips(video_id: str, raw_video_path: str = None,
                         clip.get("layout") or layout_mode)
                     clog.debug("framing src=%s dst=%s layout=%s", clip_raw,
                                clip_vert, clip_layout)
+                    # Manual crop ROIs (edit plan) are authoritative at render
+                    manual_rois = []
+                    try:
+                        from pipeline.review import get_manual_rois
+                        manual_rois = get_manual_rois(clip["id"])
+                        if manual_rois:
+                            clog.info("manual ROIs active n=%d", len(manual_rois))
+                    except Exception:
+                        clog.debug("manual ROI load skipped", exc_info=True)
                     frame_res = {}
                     try:
                         frame_res = render_vertical(clip_raw, clip_vert,
                                                     layout=clip_layout,
-                                                    cfg=framing_cfg)
+                                                    cfg=framing_cfg,
+                                                    manual_rois=manual_rois or None)
                         clip["layout"] = frame_res.get("layout", clip_layout)
                         clip["layout_reason"] = frame_res.get("layout_reason", "")
+                        kinds = frame_res.get("anchor_kinds") or {}
+                        if kinds:
+                            total = sum(kinds.values()) or 1
+                            cov = ", ".join(
+                                f"{k} {v / total:.0%}"
+                                for k, v in sorted(kinds.items(),
+                                                   key=lambda kv: -kv[1]))
+                            clip["layout_reason"] = (
+                                f"{clip['layout_reason']} | frame anchors: {cov}")
+                        clip["manual_rois"] = frame_res.get("manual_rois", [])
                         clog.info("framing layout=%s reason=%.120s",
                                   clip["layout"], clip["layout_reason"])
                     except Exception:
-                        clog.exception("framing failed, branded_fit fallback")
-                        r = subprocess.run([
-                            ffmpeg_bin, '-y', '-i', clip_raw,
-                            '-vf', ('scale=1080:1920:force_original_aspect_ratio=decrease,'
-                                    'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=#0B0F1A'),
-                            '-map', '0:v', '-map', '0:a?',
-                            '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-                            '-c:a', 'aac', clip_vert,
-                        ], capture_output=True)
-                        if r.returncode != 0:
-                            clog.error("framing fallback failed rc=%d", r.returncode)
+                        clog.exception("framing failed, center-crop fallback (no bars)")
+                        try:
+                            from pipeline.framing import render_center_crop
+                            render_center_crop(clip_raw, clip_vert)
+                        except Exception:
+                            clog.error("center-crop fallback failed, skipping clip")
                             continue
-                        clip["layout"] = "branded_fit"
-                        clip["layout_reason"] = "framing exception; static branded fallback"
+                        clip["layout"] = "center_crop"
+                        clip["layout_reason"] = "framing exception; static centre crop"
 
                     current_path = clip_vert
                     next_path = current_path
@@ -385,7 +400,8 @@ def render_clips(video_id: str, raw_video_path: str = None,
                             framing_analysis=_src or None,
                             caption_data=cap_data,
                             source_info={"width": _src.get("width"),
-                                         "height": _src.get("height")})
+                                         "height": _src.get("height")},
+                            framing_plan=frame_res or None)
                         persist_plan(video_id, clip["id"], n, _plan)
                     except Exception:
                         clog.exception("edit plan persist failed")
@@ -771,8 +787,8 @@ def main():
     parser.add_argument("video_input", nargs='?', default=None, help="URL or local path to the video")
     parser.add_argument("--campaign", help="Natural language description of the campaign", default="")
     parser.add_argument("--template", help="Name of the campaign template to use", default=None)
-    parser.add_argument("--layout", help="Vertical layout: auto, speaker_crop, stacked_split, branded_fit",
-                        default=None, choices=["auto", "speaker_crop", "stacked_split", "branded_fit"])
+    parser.add_argument("--layout", help="Vertical layout: auto, speaker_crop, stacked_split, center_crop (branded_fit only without full_screen_vertical)",
+                        default=None, choices=["auto", "speaker_crop", "stacked_split", "center_crop", "branded_fit"])
     parser.add_argument("--no-refine", help="Skip boundary refinement (keep analyzer timestamps)",
                         action="store_true")
     parser.add_argument("--log-level", help="Override log level (DEBUG/INFO/WARNING/ERROR)", default=None)

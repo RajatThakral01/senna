@@ -22,7 +22,7 @@ Built with **Groq LLM** (`openai/gpt-oss-120b` for understanding text), **local 
 - **⚡ Local Vector Knowledge Store**: 1024-dim local embeddings in PostgreSQL + pgvector HNSW; no embedding API costs or rate limits.
 - **✂️ Sentence-Complete Boundaries**: Deterministic snap + LLM validation guarantees clips never end mid-thought; rejects or repairs incomplete endings with reasons.
 - **🔗 Topical Similarity & Continuation Stitching**: pgvector search + 3-way LLM classification (`stitch`/`standalone`/`noise`) with gap/total caps so distant passages are never Franken-stitched.
-- **📱 Face-Aware 9:16 Engine**: `auto` / `speaker_crop` / `stacked_split` / `branded_fit` layouts via MediaPipe BlazeFace tracking (solid brand background — no blur default).
+- **📱 Full-Screen 9:16 Crops (hard requirement)**: `auto` / `speaker_crop` / `stacked_split` / `center_crop` via MediaPipe BlazeFace tracking + per-scene crop plans. Every shot fills the frame — no letterbox, padding, or background fill. Manual 9:16 ROIs (Review tab) override detection; heuristic crops are flagged for review.
 - **✨ Phrase-Level Karaoke Captions**: One-pass ASS burn with current-word highlighting and face-aware top/bottom placement (drawtext fallback).
 - **📋 Versioned Edit Plans**: Every clip gets a structured, fingerprinted plan (`edit_plans` table + `clip_N_plan.json`) shared by preview and export; single-pass FFmpeg polish (loudness norm, music ducking, limiter, logo, fades — speech never faded).
 - **🎨 Campaign-Aware Branding**: Natural-language campaign parsing, style templates, watermark logos, background music with ducking.
@@ -227,7 +227,7 @@ similarity: {top_k: 3, threshold: 0.5, max_stitch_gap_seconds: 45, max_total_sec
 discovery: {target_clips: 8, min_span_seconds: 15, max_span_seconds: 90}  # target = maximum
 fusion: {min_score: 0.45}      # quality floor — fewer clips when quality is insufficient
 refine: {enabled: true, max_extension_seconds: 15, max_duration: 90}
-framing: {default_layout: auto}
+framing: {default_layout: auto, full_screen_vertical: true}  # every shot fills 9:16; branded_fit manual-only
 captions: {renderer: ass, placement: auto}
 fades: {video: true, audio: false}   # speech is never faded
 export: {consolidated: true}   # false = legacy multi-pass chain

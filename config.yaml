@@ -150,9 +150,14 @@ refine:
   end_padding: 0.3            # silence kept after last word (fade lives here)
   llm_validation: true        # set false to use deterministic snap only
 
-# ── Vertical framing (face-aware 9:16, no blurred background default) ────────
+# ── Vertical framing (full-screen 9:16 crop-only; no letterbox default) ───────
 framing:
-  default_layout: "auto"      # auto | speaker_crop | stacked_split | branded_fit
+  default_layout: "auto"      # auto | speaker_crop | stacked_split | center_crop
+                              # (branded_fit is manual-only and only renders with full_screen_vertical: false)
+  full_screen_vertical: true  # HARD REQUIREMENT: every shot fills 9:16; never letterbox/pad/fit-fill
+  work_area: null             # optional DIY fallback ROI {x, y, w, h} in source pixels (9:16)
+  content_bounds: null        # optional manual content rect {x, y, w, h}; null = auto-detect embedded bars
+  content_bar_threshold: 8    # luma at/below this on all samples = embedded bar; 0 disables detection
   sample_interval: 0.25       # face-detection sampling, seconds
   deadzone_ratio: 0.15        # centre zone where the crop does not move
   smooth_factor: 0.30         # crop catch-up speed per sample

@@ -81,8 +81,8 @@ with gr.Blocks() as app:
             )
             template_choices = ["None", "podcast_clip", "tiktok_reaction", "motivational_reel"]
             template = gr.Radio(template_choices, label="Template", value="None")
-            layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "branded_fit"],
-                              label="Vertical layout (auto = face-aware; no blurred background)",
+            layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "center_crop", "branded_fit"],
+                              label="Vertical layout (auto = face-aware crop; branded_fit only without full-screen mode)",
                               value="auto")
 
             generate_btn = gr.Button("🚀 Generate Clips", variant="primary")
@@ -123,8 +123,17 @@ with gr.Blocks() as app:
                 rev_detail = gr.Code(label="Clip detail", language="json", value="{}")
                 rev_start = gr.Textbox(label="Start (s)")
                 rev_end = gr.Textbox(label="End (s)")
-                rev_layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "branded_fit"],
+                rev_layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "center_crop", "branded_fit"],
                                       label="Layout override", value="auto")
+                gr.Markdown("Manual 9:16 crop (source pixels; authoritative over detection)")
+                with gr.Row():
+                    rev_roi_x = gr.Number(label="x", value=0)
+                    rev_roi_y = gr.Number(label="y", value=0)
+                    rev_roi_w = gr.Number(label="w", value=0)
+                    rev_roi_h = gr.Number(label="h", value=0)
+                with gr.Row():
+                    rev_roi_t0 = gr.Textbox(label="t_start (s, optional)")
+                    rev_roi_t1 = gr.Textbox(label="t_end (s, optional)")
                 rev_cues = gr.Dataframe(
                     label="Caption cues (edit TEXT only, word counts fixed)",
                     headers=["start", "end", "text"],
@@ -134,6 +143,7 @@ with gr.Blocks() as app:
                     rev_apply_layout = gr.Button("Apply layout")
                 with gr.Row():
                     rev_apply_caps = gr.Button("Apply captions")
+                    rev_apply_crop = gr.Button("Apply manual crop")
                     rev_rerender = gr.Button("Re-render this clip", variant="primary")
                 rev_status = gr.Textbox(label="Review status", interactive=False)
                 rev_preview = gr.Video(label="Current final")
@@ -208,6 +218,19 @@ with gr.Blocks() as app:
             except Exception as e:
                 return f"Error: {e}"
 
+        def _rev_apply_crop(video_id, clip_no, x, y, w, h, t0, t1):
+            from pipeline.review import list_review_clips, apply_crop_override
+            try:
+                clips = list_review_clips((video_id or "").strip())
+                c = next(x for x in clips if x["clip_number"] == int(clip_no))
+                roi = apply_crop_override(
+                    c["id"], float(x), float(y), float(w), float(h),
+                    t_start=(t0 or None), t_end=(t1 or None))
+                return (f"manual 9:16 crop set {roi} "
+                        f"(detection will not override it)")
+            except Exception as e:
+                return f"Error: {e}"
+
         def _rev_rerender(video_id, clip_no):
             try:
                 finals = render_clips((video_id or "").strip(),
@@ -230,6 +253,11 @@ with gr.Blocks() as app:
                                outputs=[rev_status])
         rev_apply_caps.click(fn=_rev_apply_caps,
                              inputs=[rev_video, rev_clip_no, rev_cues],
+                             outputs=[rev_status])
+        rev_apply_crop.click(fn=_rev_apply_crop,
+                             inputs=[rev_video, rev_clip_no, rev_roi_x,
+                                     rev_roi_y, rev_roi_w, rev_roi_h,
+                                     rev_roi_t0, rev_roi_t1],
                              outputs=[rev_status])
         rev_rerender.click(fn=_rev_rerender, inputs=[rev_video, rev_clip_no],
                            outputs=[rev_status, rev_preview])

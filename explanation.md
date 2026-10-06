@@ -205,7 +205,7 @@ Snaps every clip edge to sentence starts/ends (±0.15s/0.3s padding inside neigh
 
 ### Stage 11 — Render (per clip)
 1. **Cut/stitch:** refined ranges cut via FFmpeg (multi-part → concat).
-2. **Vertical:** face-tracked 9:16 crop (single speaker follows the face; two people stack top/bottom; unsure → solid brand color, never blurry background). Audio carried over.
+2. **Vertical:** hard requirement — every shot is a face-/subject-tracked 9:16 crop filling 1080×1920 (face scenes follow the speaker, workbench scenes hold the work area or centre crop; manual 9:16 ROIs from the Review tab always win). Never letterboxed, never stretched; embedded source bars are detected and removed before cropping. Audio carried over.
 3. **Subtitles:** words → gap-free timing → phrase cues (≤8 words, 2 lines) → yellow karaoke ASS burn in one pass (top placement when faces sit low).
 4. **Edit plan:** structured plan saved versioned (DB + `clip_N_plan.json`) — preview and export use the same plan.
 5. **Polish:** ONE ffmpeg pass — subtitles, fades (video only; speech never faded), logo, ducked background music, loudness normalization, limiter.
