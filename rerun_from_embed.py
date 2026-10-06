@@ -9,15 +9,20 @@ What it does, in order:
        - DELETE related_segments rows for this video's clips
        - DELETE clips rows for this video (analyze re-inserts fresh rows,
          so re-running can never create duplicates)
-       - DELETE pipeline_runs checkpoints for embed/analyze/similarity/render
+       - DELETE candidates + outlines + audio_events rows for this video
+       - DELETE pipeline_runs checkpoints for
+         audio_events/embed/outline/analyze/similarity/refine/render
          so should_skip_stage() lets each stage run again.
      Chunks and transcripts are reused untouched.
-  3. Stage 5 (embed):    embed_all_chunks() — NULL/pending chunks get fresh
+  3. Audio events: detect_audio_events() on source audio + event cues.
+  4. Stage 5 (embed):    embed_all_chunks() — NULL/pending chunks get fresh
      1024-dim local vectors.
-  4. Stage 6 (analyze):  analyze() — Grok LLM finds viral clips.
-  5. Stage 7 (similarity): find_related_segments() — pgvector search +
+  5. Outline:            build_outline() — video structure (fingerprint-gated).
+  6. Stage 6 (analyze):  analyze() — two-pass discovery + legacy fallback.
+  7. Stage 7 (similarity): find_related_segments() — pgvector search +
      LLM stitch/standalone/noise classification.
-  6. Stage 8 (render):   render_clips() — cut/vertical/subtitles/logo/music/
+  8. Stage 8 (refine):   refine_all_clips() — sentence-complete boundaries.
+  9. Stage 9 (render):   render_clips() — cut/vertical/subtitles/logo/music/
      fades + report.json.
   7. Prints a per-clip summary table with each candidate's similarity score
      next to the LLM's stitch/standalone/noise decision.
@@ -32,13 +37,14 @@ from db.repositories import video_repo, chunk_repo, clip_repo, run_repo
 from pipeline.embedder import embed_all_chunks
 from pipeline.analyzer import analyze
 from pipeline.similarity import find_related_segments
-from main import render_clips
+from pipeline.boundaries import refine_all_clips, persist_refinements
+from main import render_clips, get_video_duration, invalidate_stage
 from config import get_config
 
 setup_logging()
 log = get_logger("rerun")
 
-STAGES = ("embed", "analyze", "similarity", "render")
+STAGES = ("audio_events", "embed", "outline", "analyze", "similarity", "refine", "render")
 
 
 def _check_uuid(video_id: str) -> str:
@@ -60,13 +66,18 @@ def cleanup(video_id: str) -> dict:
             nrel = cur.rowcount
             cur.execute("DELETE FROM clips WHERE video_id = %s", (video_id,))
             nclips = cur.rowcount
+            cur.execute("DELETE FROM candidates WHERE video_id = %s", (video_id,))
+            ncand = cur.rowcount
+            cur.execute("DELETE FROM outlines WHERE video_id = %s", (video_id,))
+            nout = cur.rowcount
             cur.execute("""
                 DELETE FROM pipeline_runs
-                WHERE video_id = %s AND stage IN ('embed','analyze','similarity','render')
+                WHERE video_id = %s AND stage IN ('audio_events','embed','outline','analyze','similarity','refine','render')
             """, (video_id,))
             nruns = cur.rowcount
             conn.commit()
-            return {"related_segments": nrel, "clips": nclips, "pipeline_runs": nruns}
+            return {"related_segments": nrel, "clips": nclips, "candidates": ncand,
+                    "outlines": nout, "pipeline_runs": nruns}
     finally:
         release_conn(conn)
 
@@ -113,9 +124,61 @@ def main() -> None:
 
     with log_stage("rerun", "cleanup", video_id=video_id):
         counts = cleanup(video_id)
+        # derived discovery/event rows cleared alongside clips
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                for _t in ("candidates", "outlines", "audio_events"):
+                    cur.execute(f"DELETE FROM {_t} WHERE video_id = %s", (video_id,))
+                    counts[_t] = cur.rowcount
+                conn.commit()
+        finally:
+            release_conn(conn)
         plog.info("cleanup done deleted=%s", counts)
 
     config = get_config()
+
+    if True:  # Stage: Audio events
+        from pipeline.audio_events import (
+            ensure_source_audio, detect_audio_events, propose_from_events,
+            enrich_event_candidates, persist_events)
+        from pipeline.audio_classifier import classify_events
+        from pipeline.boundaries import load_words as _lw, build_sentences as _bs
+        from db.repositories import candidate_repo as _cr
+        run_repo.start_stage(video_id, "audio_events")
+        try:
+            with log_stage("rerun", "audio_events", video_id=video_id):
+                a_cfg = dict(config.get("audio_events", {}))
+                if a_cfg.get("enabled", True):
+                    wav = ensure_source_audio(
+                        video.get("raw_path") or "input/raw_video.mp4",
+                        "downloads/audio.wav")
+                    events, _ = detect_audio_events(wav, config)
+                    try:
+                        import librosa as _lib
+                        _y, _sr = _lib.load(wav, sr=16000, mono=True)
+                    except Exception:
+                        _y, _sr = None, 16000
+                    events, _cstat = classify_events(events, _y, _sr, config)
+                    persist_events(video_id, events)
+                    _words = _lw("transcripts/transcript.json")
+                    _sents = _bs(_words)
+                    cues = enrich_event_candidates(
+                        propose_from_events(events, _words, _sents, config), config)
+                    _cr.clear_candidates(video_id, source="audio_event")
+                    for _c in cues:
+                        _cr.insert_candidate(
+                            video_id, "audio_event", _c["sentence_ids"],
+                            _c["source_ranges"], rationale=_c.get("rationale"),
+                            uncertainty=_c.get("uncertainty"),
+                            scores={"provenance": _c.get("provenance", {})},
+                            status="proposed")
+                    plog.info("audio_events done events=%d cues=%d",
+                              len(events), len(cues))
+            run_repo.complete_stage(video_id, "audio_events")
+        except Exception as e:
+            run_repo.fail_stage(video_id, "audio_events", str(e))
+            raise
 
     if True:  # Stage 5: Embed
         run_repo.start_stage(video_id, "embed")
@@ -130,7 +193,29 @@ def main() -> None:
             run_repo.fail_stage(video_id, "embed", str(e))
             raise
 
-    if True:  # Stage 6: Analyze
+    if True:  # Stage 6: Outline
+        from pipeline.boundaries import load_words, build_sentences
+        from pipeline.outline import build_outline, persist_outline
+        from pipeline.fingerprints import (outline_fingerprint,
+                                            transcript_signature)
+        run_repo.start_stage(video_id, "outline")
+        try:
+            with log_stage("rerun", "outline", video_id=video_id):
+                tsig = transcript_signature("transcripts/transcript.json")
+                ofp = outline_fingerprint(
+                    tsig, config.get("ai", {}).get("llm_model", ""), config)
+                words = load_words("transcripts/transcript.json")
+                sents = build_sentences(words)
+                ol = build_outline(words, sents, None, cfg=config)
+                persist_outline(video_id, ol)
+                run_repo.set_fingerprint(video_id, "outline", ofp)
+                plog.info("outline done method=%s", ol.get("method"))
+            run_repo.complete_stage(video_id, "outline")
+        except Exception as e:
+            run_repo.fail_stage(video_id, "outline", str(e))
+            raise
+
+    if True:  # Stage 6b: Analyze
         run_repo.start_stage(video_id, "analyze")
         try:
             with log_stage("rerun", "analyze", video_id=video_id):
@@ -157,7 +242,37 @@ def main() -> None:
             run_repo.fail_stage(video_id, "similarity", str(e))
             raise
 
-    # Stage 8: Render (raw path + default campaign resolved inside)
+    # Stage 8: Refine (sentence-complete boundaries, LLM-validated)
+    run_repo.start_stage(video_id, "refine")
+    try:
+        with log_stage("rerun", "refine", video_id=video_id):
+            clips = clip_repo.get_clips_for_video(video_id)
+            confirmed = clip_repo.get_confirmed_segments_for_video(video_id)
+            for c in clips:
+                c["related_segments"] = confirmed.get(c["id"], [])
+            refine_cfg = dict(config.get("refine", {}))
+            if refine_cfg.get("enabled", True):
+                vid_dur = get_video_duration(video.get("raw_path") or "input/raw_video.mp4")
+                refined = refine_all_clips(clips,
+                                           transcript_path="transcripts/transcript.json",
+                                           video_duration=vid_dur,
+                                           cfg={**config, **refine_cfg})
+                from pipeline.fusion import deduplicate_refined
+                _kept, _dropped = deduplicate_refined(refined)
+                for _dc, _why in _dropped:
+                    _dc["refine_status"] = "rejected"
+                    _dc["refine_reason"] = _why[:500]
+                persist_refinements(video_id, refined)
+                plog.info("refine found %d clips (%d rejected)",
+                          len(refined),
+                          sum(1 for c in refined if c.get("refine_status") == "rejected"))
+        run_repo.complete_stage(video_id, "refine")
+        invalidate_stage(video_id, "render")
+    except Exception as e:
+        run_repo.fail_stage(video_id, "refine", str(e))
+        raise
+
+    # Stage 9: Render (raw path + default campaign resolved inside)
     finals = render_clips(video_id)
     plog.info("rerun complete finals=%d", len(finals))
 

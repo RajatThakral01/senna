@@ -9,8 +9,10 @@ successful stage rather than restarting from scratch.
 Input:  video_id UUID string, stage name (str), error messages.
 Output: Stage status strings; boolean helpers used by main.py.
 
-Stage names: transcribe | chunk | embed | analyze | similarity | render
-Status values: pending | running | done | failed
+Stage names: transcribe | chunk | embed | outline | analyze | similarity | refine | render
+(+ audio_events, fusion as introduced). Status values: pending | running | done | failed.
+Fingerprints (stage_fingerprints table): re-run a 'done' stage when its
+fingerprint changed; downstream invalidation is handled by the caller.
 """
 from db.connection import get_conn, release_conn
 import logging
@@ -104,3 +106,54 @@ def get_stage_status(video_id: str, stage: str) -> str | None:
             return row[0] if row else None
     finally:
         release_conn(conn)
+
+
+def get_fingerprint(video_id: str, stage: str) -> str | None:
+    """Return the stored fingerprint for a stage, or None."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT fingerprint FROM stage_fingerprints
+                WHERE video_id = %s AND stage = %s
+            """, (video_id, stage))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception:
+        # table missing (pre-migration DB): treat as no fingerprint
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
+    finally:
+        release_conn(conn)
+
+
+def set_fingerprint(video_id: str, stage: str, fingerprint: str) -> None:
+    """Upsert the fingerprint for a completed stage."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO stage_fingerprints (video_id, stage, fingerprint, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (video_id, stage)
+                DO UPDATE SET fingerprint = EXCLUDED.fingerprint, updated_at = NOW()
+            """, (video_id, stage, fingerprint or ""))
+            conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.warning("set_fingerprint failed (pre-migration DB?) video=%.8s stage=%s",
+                    video_id, stage)
+    finally:
+        release_conn(conn)
+
+
+def fingerprint_matches(video_id: str, stage: str, fingerprint: str) -> bool:
+    """True when a stored fingerprint exists and equals the given one."""
+    stored = get_fingerprint(video_id, stage)
+    return stored is not None and stored == (fingerprint or "")

@@ -4,5 +4,6 @@
   "fade": true,
   "split_screen": false,
   "music": null,
-  "min_clip_duration": 45
+  "min_clip_duration": 45,
+  "layout": "auto"
 }

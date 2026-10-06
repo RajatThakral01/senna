@@ -61,3 +61,150 @@ similarity:
   top_k: 3
   threshold: 0.5   # tuned for Qwen3-Embedding-0.6B (was 0.65 for the NVIDIA model)
   llm_confirmation: true
+  max_stitch_gap_seconds: 45  # distant passages are related, not continuations
+  max_total_seconds: 90       # cap stitched output length (validated joins)
+
+# ── Whole-video outline (Phase-1 pass 1) ─────────────────────────────────────
+outline:
+  window_sentences: 40   # transcript sentences per outline LLM call
+  max_windows: 12        # beyond this, windows widen for even coverage
+
+# ── Contextual discovery (Phase-1 pass 2) ────────────────────────────────────
+discovery:
+  target_clips: 8        # desired selected clips (Phase 3 treats as target/max)
+  max_candidates: 24     # cap on validated candidates kept in the pool
+  sentences_per_call: 120  # transcript sentences per discovery LLM call
+  min_span_seconds: 15    # candidate spans shorter than this are rejected
+  max_span_seconds: 90   # candidate spans longer than this are rejected
+  allow_noncontiguous: false  # optional distant-join assembly (validated)
+  legacy_fallback: true  # per-chunk extraction when discovery yields nothing
+
+# ── Audio events (energy spikes on source audio) ──────────────────────────────
+audio_events:
+  enabled: true
+  window_ms: 200          # RMS window (100-250ms)
+  baseline_seconds: 10    # rolling median baseline half-width
+  threshold_db: 8.0       # dB above local baseline to trigger
+  min_duration_seconds: 0.4   # shorter detections (clicks) suppressed
+  max_event_seconds: 8.0  # sustained regions capped here (confidence lowered)
+  merge_gap_seconds: 1.0  # merge detections closer than this
+  silence_floor: 0.0001   # energy floor (silence safety)
+  pre_seconds: 25         # transcript looked back from spike (setup/joke)
+  post_seconds: 10        # transcript looked forward from spike
+  min_speech_coverage: 0.3  # candidate only when speech covers this fraction
+  classifier:             # optional labels; backend none|yamnet (default none)
+    backend: "none"
+    # model_dir: "models/yamnet"   # yamnet.tflite + class map here to enable
+    min_label_confidence: 0.3
+
+# ── Fusion + global ranking (Phase 3) ─────────────────────────────────────────
+fusion:
+  merge_iou: 0.7         # candidate overlap IoU at which proposals merge
+  diversity_iou: 0.5      # selected clips must stay below this pairwise IoU
+  diversity_sim: 0.92     # ...unless text similarity is below this (same-topic OK)
+  min_score: 0.45         # quality floor: below this, no clip (with reason)
+  # weights: opening/standalone/payoff/completeness/relevance/editability/audio_support
+  weights: {opening: 0.22, standalone: 0.24, payoff: 0.16, completeness: 0.16,
+            relevance: 0.08, editability: 0.09, audio_support: 0.05}
+
+# ── Transcription (WhisperX + alignment) ───────────────────────────────────────
+transcription:
+  model: "base"          # override via WHISPER_MODEL (e.g. large-v3, turbo)
+  device: "auto"         # auto (CUDA when available, else CPU) | cuda | cpu;
+                         # measured 60s sample: cuda 1.5s vs cpu 11.0s
+                         # transcribe, identical words (see output/bench_transcription.json)
+  compute_type: "float32"  # override via WHISPER_COMPUTE (float32|float16|int8)
+  language: "en"         # override via WHISPER_LANGUAGE
+  glossary: []           # [{match: "AirPower", replacement: "AirPower"}]
+                         # display-text corrections; timings/source kept,
+                         # corrections traceable (see transcripts/glossary.json)
+
+# ── Captions (phrase-level ASS karaoke) ────────────────────────────────────────
+captions:
+  enabled: true
+  renderer: "ass"        # ass (libass, one pass) | drawtext (legacy word burn)
+  max_words: 8           # words per cue
+  max_chars: 42          # characters per cue
+  max_duration: 4.0      # seconds per cue
+  max_lines: 2
+  font: "Arial"
+  font_size: 64           # at 1080x1920 canvas
+  primary_color: "&H00FFFFFF"
+  highlight_color: "&H0000E0FF"  # yellow (ASS BGR), matches brand
+  outline_color: "&H80000000"
+  outline_width: 2
+  shadow: 1
+  placement: "auto"      # auto (faces low -> top, else bottom) | bottom | top
+  margin_v: 180          # bottom margin px
+  margin_v_top: 180      # top margin px
+
+# ── Boundary refinement (sentence-complete clip ends) ─────────────────────────
+# Runs after similarity, before render. All values tunable without code edits.
+refine:
+  enabled: true
+  context_seconds: 20        # transcript context on each side for LLM validation
+  max_extension_seconds: 15  # max the end may move beyond the candidate end
+  min_duration: 20            # advisory only; never pads into unrelated speech
+  max_duration: 90            # shorten from the START only; never cut the ending
+  start_padding: 0.15         # silence kept before first word
+  end_padding: 0.3            # silence kept after last word (fade lives here)
+  llm_validation: true        # set false to use deterministic snap only
+
+# ── Vertical framing (face-aware 9:16, no blurred background default) ────────
+framing:
+  default_layout: "auto"      # auto | speaker_crop | stacked_split | branded_fit
+  sample_interval: 0.25       # face-detection sampling, seconds
+  deadzone_ratio: 0.15        # centre zone where the crop does not move
+  smooth_factor: 0.30         # crop catch-up speed per sample
+  jitter_px: 5                # ignore smaller shifts (anti-micro-shake)
+  snap_ratio: 0.25            # jump >25% width = hard cut to new speaker
+  hold_last_position_seconds: 1.0  # retain last crop during detection loss
+  layout_stability_frames: 6  # consecutive samples before a layout switch
+  min_face_fraction: 0.5      # faces must cover this share of samples or fallback
+  scene_cut_threshold: 18     # frame-diff sensitivity; resets tracking at cuts
+  headroom_ratio: 0.35        # face position from top of crop
+  min_zoom: 1.0
+  max_zoom: 2.5
+  split_divider_px: 6
+  branded_background: "#0B0F1A"  # solid fallback colour (no blur)
+  face_confidence: 0.5
+  # face_model: "models/blaze_face_short_range.tflite"  # override download path
+  allow_active_speaker_switch: false  # v1: keep false; needs explicit speaker_map
+  speaker_map: {}             # e.g. {SPEAKER_00: left, SPEAKER_01: right}
+
+# ── Speakers (optional active-speaker adapter; default OFF) ───────────────────
+speakers:
+  enabled: false          # master switch; stacked/branded used when off/uncertain
+  auto_match: false       # no evaluated auto-matcher exists; keep false
+  min_turn_seconds: 1.5   # stable speaking turn required before a switch
+  hold_seconds: 2.0       # hold current speaker this long (anti-flicker)
+  # speaker_map: {SPEAKER_00: left, SPEAKER_01: right}  # fixed-seat podcasts
+
+# ── Visual analysis (optional; default OFF) ──────────────────────────────────
+visual:
+  enabled: false
+  backend: "none"         # none | groq_vision (unavailable: no vision model on key)
+  max_frames: 12          # keyframes per analysis call (cost control)
+
+# ── Audio treatment (polish stage) ───────────────────────────────────────────
+audio:
+  normalize_loudness: true  # speech loudness normalization (EBU-ish, single pass)
+  peak_limit_db: -1.5       # true-peak ceiling for the limiter
+  duck_music: true          # sidechain-duck music under speech
+  denoise: false            # optional conservative noise reduction (afftdn)
+  # (speech fade stays off; see [fades].audio — fades live in end_padding)
+
+# ── Export (polish stage) ────────────────────────────────────────────────────
+export:
+  consolidated: true      # one ffmpeg pass (ass+fade+logo+music+norm); false = legacy chain
+  codec: "libx264"
+  preset: "fast"
+  crf: 23
+  audio_bitrate: "128k"
+  fps: null               # null = keep source fps
+
+# ── Fades (speech fade-out disabled by default) ───────────────────────────────
+fades:
+  video: true                 # video fade in/out
+  audio: false                # keep speech intact; when true, fade sits in end_padding
+  duration: 0.5

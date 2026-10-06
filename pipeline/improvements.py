@@ -7,8 +7,16 @@ from config import ffmpeg_path, ffprobe_path
 
 log = get_logger("pipeline.improvements")
 
-def add_fades(input_path, output_path, fade_duration=0.3):
-    log.info("fades start in=%.60s out=%.60s dur=%.2f", input_path, output_path, fade_duration)
+def add_fades(input_path, output_path, fade_duration=0.3, audio=True):
+    """Apply video (+optional audio) fades.
+
+    Speech fade-out is DISABLED by default (audio=False): the clip ends on a
+    completed sentence with end_padding silence, so no afade touches speech.
+    Pass audio=True only to fade music/ambience, and only after the final
+    spoken word (callers ensure the fade window sits inside end_padding).
+    """
+    log.info("fades start in=%.60s out=%.60s dur=%.2f audio=%s", input_path,
+             output_path, fade_duration, audio)
     t0 = time.monotonic()
     probe = subprocess.run([
         ffprobe_path(),
@@ -37,14 +45,16 @@ def add_fades(input_path, output_path, fade_duration=0.3):
             f'fade=t=in:st=0:d={fade_duration},'
             f'fade=t=out:st={fade_out_start:.3f}:d={fade_duration}'
         ),
-        '-af', (
-            f'afade=t=in:st=0:d={fade_duration},'
-            f'afade=t=out:st={fade_out_start:.3f}:d={fade_duration}'
-        ),
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        '-c:a', 'aac',
-        output_path
     ]
+    if audio:
+        cmd += ['-af',
+                f'afade=t=in:st=0:d={fade_duration},'
+                f'afade=t=out:st={fade_out_start:.3f}:d={fade_duration}',
+                '-c:a', 'aac']
+    else:
+        cmd += ['-c:a', 'copy']
+    cmd += [output_path]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         log.error("fades failed rc=%d err=%.300s", result.returncode, (result.stderr or "")[-300:])

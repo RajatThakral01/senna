@@ -51,10 +51,11 @@ LLM_API_KEY = GROQ_API_KEY
 LLM_MODEL = GROQ_LLM_MODEL
 LLM_API_URL = f"{GROQ_BASE_URL.rstrip('/')}/chat/completions"
 
-# WhisperX settings
+# WhisperX settings (defaults; config.yaml [transcription] + WHISPER_* env win)
 WHISPER_MODEL    = "base"
 WHISPER_LANGUAGE = "en"
 WHISPER_DEVICE   = "cpu"
+WHISPER_COMPUTE  = "float32"
 
 
 # ── New: get_config() reads config.yaml + env overrides ──────────────────────
@@ -116,7 +117,36 @@ def get_config() -> dict:
         },
         "chunking":   cfg["chunking"],
         "embeddings": emb_cfg,
+        "outline":    cfg.get("outline", {}) or {},
+        "discovery":  cfg.get("discovery", {}) or {},
+        "audio_events": cfg.get("audio_events", {}) or {},
+        "fusion":     cfg.get("fusion", {}) or {},
+        "captions":   cfg.get("captions", {}) or {},
+        "audio":      cfg.get("audio", {}) or {},
+        "export":     cfg.get("export", {}) or {},
+        "speakers":   cfg.get("speakers", {}) or {},
+        "visual":     cfg.get("visual", {}) or {},
+        "transcription": {
+            "model": os.getenv("WHISPER_MODEL",
+                               cfg.get("transcription", {}).get("model", WHISPER_MODEL)),
+            "device": os.getenv("WHISPER_DEVICE",
+                                cfg.get("transcription", {}).get("device", WHISPER_DEVICE)),
+            "compute_type": os.getenv(
+                "WHISPER_COMPUTE",
+                cfg.get("transcription", {}).get("compute_type", WHISPER_COMPUTE)),
+            "language": os.getenv("WHISPER_LANGUAGE",
+                                  cfg.get("transcription", {}).get("language", WHISPER_LANGUAGE)),
+            "glossary": cfg.get("transcription", {}).get("glossary", []) or [],
+        },
         "similarity": cfg["similarity"],
+        "refine":     cfg.get("refine", {"enabled": True, "context_seconds": 20,
+                                         "max_extension_seconds": 15,
+                                         "min_duration": 20, "max_duration": 90,
+                                         "start_padding": 0.15, "end_padding": 0.3,
+                                         "llm_validation": True}),
+        "framing":    cfg.get("framing", {"default_layout": "auto"}),
+        "fades":      cfg.get("fades", {"video": True, "audio": False,
+                                        "duration": 0.5}),
         "logging":    cfg.get("logging", {"level": "INFO",
                                           "file": "logs/viral-clips.log",
                                           "console": True}),
