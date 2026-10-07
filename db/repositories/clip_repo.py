@@ -83,15 +83,34 @@ def get_clips_for_video(video_id: str) -> list:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, video_id, clip_number, start_time, end_time, duration_seconds,
-                       hook, reason, suggested_title, suggested_hashtags,
-                       source_chunk_ids, output_path, created_at,
-                       embedding::text as embedding
-                FROM clips
-                WHERE video_id = %s
-                ORDER BY clip_number ASC
-            """, (video_id,))
+            try:
+                cur.execute("""
+                    SELECT id, video_id, clip_number, start_time, end_time, duration_seconds,
+                           hook, reason, suggested_title, suggested_hashtags,
+                           source_chunk_ids, output_path, created_at,
+                           embedding::text as embedding,
+                           refine_status, refine_reason,
+                           source_ranges, timeline, layout, layout_reason,
+                           provenance
+                    FROM clips
+                    WHERE video_id = %s
+                    ORDER BY clip_number ASC
+                """, (video_id,))
+            except Exception as e:
+                if "does not exist" in str(e):
+                    conn.rollback()
+                    log.warning("v4 clip columns missing, reading legacy columns")
+                    cur.execute("""
+                        SELECT id, video_id, clip_number, start_time, end_time, duration_seconds,
+                               hook, reason, suggested_title, suggested_hashtags,
+                               source_chunk_ids, output_path, created_at,
+                               embedding::text as embedding
+                        FROM clips
+                        WHERE video_id = %s
+                        ORDER BY clip_number ASC
+                    """, (video_id,))
+                else:
+                    raise
             cols = [d[0] for d in cur.description]
             rows = []
             import json
@@ -110,6 +129,123 @@ def get_clips_for_video(video_id: str) -> list:
             return rows
     except Exception:
         log.exception("get_clips failed video=%.8s", video_id)
+        raise
+    finally:
+        release_conn(conn)
+
+
+def get_confirmed_segments_for_video(video_id: str) -> dict:
+    """Return {clip_id: [chunk dicts]} for LLM-confirmed (stitch) continuations.
+
+    Chunk dicts carry id/start_time/end_time/text — exactly what
+    pipeline.clipper.get_time_ranges_for_clip() reads from
+    clip["related_segments"].
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT r.clip_id, ch.id, ch.start_time, ch.end_time, ch.text
+                FROM related_segments r
+                JOIN clips c  ON c.id = r.clip_id
+                JOIN chunks ch ON ch.id = r.related_chunk_id
+                WHERE c.video_id = %s AND r.confirmed_by_llm = TRUE
+                ORDER BY ch.start_time ASC
+            """, (video_id,))
+            out = {}
+            for clip_id, chunk_id, start, end, text in cur.fetchall():
+                out.setdefault(str(clip_id), []).append({
+                    "id": str(chunk_id),
+                    "start_time": start,
+                    "end_time": end,
+                    "text": text,
+                })
+            log.debug("confirmed segments video=%.8s clips=%d", video_id, len(out))
+            return out
+    except Exception:
+        log.exception("confirmed segments failed video=%.8s", video_id)
+        raise
+    finally:
+        release_conn(conn)
+
+
+def mark_segments_stitched(clip_id: str) -> None:
+    """Flag confirmed segments of a clip as consumed by the FFmpeg stitch."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE related_segments
+                SET stitched_into_clip = TRUE
+                WHERE clip_id = %s AND confirmed_by_llm = TRUE
+            """, (clip_id,))
+            conn.commit()
+    except Exception:
+        log.exception("mark stitched failed clip=%.8s", str(clip_id))
+        raise
+    finally:
+        release_conn(conn)
+
+
+def update_refine_status(clip_id: str, status: str, reason: str = "") -> None:
+    """Set refine_status/reason only (e.g. post-refine duplicate rejection)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("UPDATE clips SET refine_status=%s, refine_reason=%s WHERE id=%s",
+                            (status, reason[:500] if reason else "", clip_id))
+            except Exception as e:
+                if "does not exist" in str(e):
+                    conn.rollback()
+                    log.warning("refine_status column missing, skip")
+                    return
+                raise
+            conn.commit()
+    finally:
+        release_conn(conn)
+
+
+def update_refinement(clip_id: str, start_time: float, end_time: float,
+                      refine_status: str = "refined", refine_reason: str = "",
+                      source_ranges=None, timeline=None,
+                      layout: str = None, layout_reason: str = "") -> None:
+    """Persist refined boundaries + timeline + layout.
+
+    Uses v4 columns when the migration has been applied; falls back to
+    start/end/duration update so render+report stay correct on old schemas.
+    """
+    import json as _json
+    duration = (float(end_time) - float(start_time)) if end_time and start_time else 0
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("""
+                    UPDATE clips SET start_time=%s, end_time=%s, duration_seconds=%s,
+                        refine_status=%s, refine_reason=%s,
+                        source_ranges=%s::jsonb, timeline=%s::jsonb,
+                        layout=%s, layout_reason=%s
+                    WHERE id=%s
+                """, (float(start_time), float(end_time), float(duration),
+                      refine_status, refine_reason[:500] if refine_reason else "",
+                      _json.dumps(source_ranges or []),
+                      _json.dumps(timeline or []),
+                      layout, (layout_reason or "")[:500], clip_id))
+            except Exception as e:
+                # UndefinedColumn on pre-migration DBs -> minimal update
+                if "UndefinedColumn" in type(e).__name__ or "does not exist" in str(e):
+                    conn.rollback()
+                    log.warning("refine columns missing, falling back to times-only update")
+                    cur.execute("""
+                        UPDATE clips SET start_time=%s, end_time=%s, duration_seconds=%s
+                        WHERE id=%s
+                    """, (float(start_time), float(end_time), float(duration), clip_id))
+                else:
+                    raise
+            conn.commit()
+    except Exception:
+        log.exception("update_refinement failed clip=%.8s", str(clip_id))
         raise
     finally:
         release_conn(conn)

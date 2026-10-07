@@ -4,27 +4,30 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B%20%7C%20pgvector-336791.svg)](https://github.com/pgvector/pgvector)
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0%2B-007808.svg)](https://ffmpeg.org/)
-[![NVIDIA NIM](https://img.shields.io/badge/NVIDIA-NIM%20API-76B900.svg)](https://build.nvidia.com)
+[![Groq](https://img.shields.io/badge/Groq-LLM%20API-orange.svg)](https://console.groq.com)
 
 **Viral Clips Automator** is an end-to-end autonomous AI pipeline that transforms long-form videos (podcasts, interviews, streams, webinars) into high-performing 9:16 vertical short-form viral clips optimized for **TikTok**, **Instagram Reels**, and **YouTube Shorts**.
 
-Built with **NVIDIA NIM** (LLM analysis & vector embeddings), **WhisperX** (word-level transcription), **PostgreSQL + pgvector** (HNSW semantic memory), and **FFmpeg** (dynamic 9:16 vertical framing, blurred backdrop, and word-level karaoke subtitles).
+Built with **Groq LLM** (`openai/gpt-oss-120b` for understanding text), **local SentenceTransformer embeddings** (`Qwen3-Embedding-0.6B`, 1024-dim, no API key), **WhisperX** (word-level transcription), **PostgreSQL + pgvector** (HNSW semantic memory), and **FFmpeg** (face-aware 9:16 framing, ASS karaoke captions, single-pass polish).
 
 ---
 
 ## 🌟 Key Features
 
-- **🌐 Multi-Source Ingestion**: Ingests video from YouTube, YouTube Live streams, Google Drive, direct MP4 URLs, or local files.
-- **🎙️ Word-Level Accurate Transcription**: Powered by WhisperX with precise word timestamps to enable exact cut points and synchronized subtitles.
-- **🧠 Semantic & Silence-Gap Chunking**: Splits audio at natural pauses and silence boundaries rather than arbitrary time intervals, preserving complete thoughts and narrative flow.
-- **⚡ Vector-Embedded Knowledge Store**: Uses NVIDIA `nv-embedqa-e5-v5` (1024-dimensional embeddings) stored in PostgreSQL with pgvector HNSW indexing.
-- **🎯 AI Viral Hook & Segment Analyzer**: Uses `moonshotai/kimi-k2.6` (via NVIDIA NIM) to identify high-retention hooks, compelling arguments, and viral segments.
-- **🔗 Topical Similarity & Continuation Stitching**: Finds related points separated across the video and stitches them seamlessly into complete, cohesive short stories.
-- **📱 9:16 Vertical Video Engine**: Converts 16:9 widescreen video into 9:16 vertical format with an aesthetically pleasing blurred background and foreground centering.
-- **✨ Synchronized Word-by-Word Karaoke Subtitles**: Burns stylish, high-retention subtitles into the video with real-time word highlighting.
-- **🎨 Campaign-Aware Branding**: Customize style templates (e.g. podcast, motivational reel, reaction), apply watermark logos, and mix background music with audio ducking.
-- **🔁 Checkpointed Resumption**: Every stage is logged in PostgreSQL; interrupted runs can be resumed without re-downloading or re-transcribing.
-- **💻 Dual Interface**: Run headless via the Command Line Interface (CLI) or launch an interactive Gradio Web UI.
+- **🌐 Multi-Source Ingestion**: YouTube (with 360p fallback), YouTube Live (300s cap), Google Drive, direct MP4 URLs, or local files.
+- **🎙️ Word-Level Accurate Transcription**: WhisperX with per-word timestamps; `device: auto` uses CUDA when available. Traceable glossary corrections.
+- **🧠 Semantic & Silence-Gap Chunking**: Splits at natural pauses and sentence boundaries, never mid-thought; 25s overlap so boundary moments are never lost.
+- **🔊 Audio-Event Discovery**: RMS spike detector finds laughter/applause/reactions and proposes transcript-aligned candidates (optional YAMNet labels, off by default).
+- **🗺️ Whole-Video Understanding**: Two-pass contextual discovery — video outline (topics, Q&A, story arcs) → sentence-ID-cited candidates → editorial fusion ranking with quality floor and recorded reasons.
+- **⚡ Local Vector Knowledge Store**: 1024-dim local embeddings in PostgreSQL + pgvector HNSW; no embedding API costs or rate limits.
+- **✂️ Sentence-Complete Boundaries**: Deterministic snap + LLM validation guarantees clips never end mid-thought; rejects or repairs incomplete endings with reasons.
+- **🔗 Topical Similarity & Continuation Stitching**: pgvector search + 3-way LLM classification (`stitch`/`standalone`/`noise`) with gap/total caps so distant passages are never Franken-stitched.
+- **📱 Full-Screen 9:16 Crops (hard requirement)**: `auto` / `speaker_crop` / `stacked_split` / `center_crop` via MediaPipe BlazeFace tracking + per-scene crop plans. Every shot fills the frame — no letterbox, padding, or background fill. Manual 9:16 ROIs (Review tab) override detection; heuristic crops are flagged for review.
+- **✨ Phrase-Level Karaoke Captions**: One-pass ASS burn with current-word highlighting and face-aware top/bottom placement (drawtext fallback).
+- **📋 Versioned Edit Plans**: Every clip gets a structured, fingerprinted plan (`edit_plans` table + `clip_N_plan.json`) shared by preview and export; single-pass FFmpeg polish (loudness norm, music ducking, limiter, logo, fades — speech never faded).
+- **🎨 Campaign-Aware Branding**: Natural-language campaign parsing, style templates, watermark logos, background music with ducking.
+- **🔁 Checkpointed Resumption**: Every stage in PostgreSQL (fingerprint-gated); interrupted runs resume; `rerun_from_embed.py` re-runs embed→render dup-safe.
+- **💻 Dual Interface + Review**: CLI or Gradio Web UI with a **Review & Correct** tab (boundary/layout/caption fixes + selective per-clip re-render).
 
 ---
 
@@ -32,20 +35,24 @@ Built with **NVIDIA NIM** (LLM analysis & vector embeddings), **WhisperX** (word
 
 ```mermaid
 flowchart TD
-    A[Video Source: YouTube / Drive / Local] --> B[1. Input Handler & Normalization]
+    A[Video Source: YouTube / Drive / Local] --> B[1. Input Normalization]
     B --> C[(PostgreSQL Video Record)]
-    B --> D[2. Audio Extraction & WhisperX Transcription]
-    D --> E[transcripts/transcript.json]
-    E --> F[3. Semantic Silence Chunker]
-    F --> G[(PostgreSQL Chunks Table)]
-    G --> H[4. NVIDIA NIM Embeddings - 1024 dim]
-    H --> I[(pgvector HNSW Index)]
-    I --> J[5. NVIDIA NIM LLM Viral Clip Analysis]
-    J --> K[(PostgreSQL Clips Table)]
-    K --> L[6. Topical Similarity Search & Stitching]
-    L --> M[7. FFmpeg Vertical Canvas & Subtitle Burn]
-    M --> N[8. Audio/Video Polish: Fades, Logos, Music]
-    N --> O[output/clip_N_final.mp4]
+    B --> D[2. Campaign Parsing - Groq LLM]
+    D --> E[3. WhisperX Transcription]
+    E --> F[transcripts/transcript.json]
+    F --> G[4. Semantic Silence Chunker]
+    G --> H[(Chunks Table)]
+    F --> I[5. Audio-Event Detection]
+    I --> J[(Event Candidates)]
+    H --> K[6. Local Embeddings - 1024 dim]
+    K --> L[(pgvector HNSW Index)]
+    L --> M[7. Outline - Whole-Video Structure]
+    M --> N[8. Discovery + Fusion Ranking]
+    N --> O[(Clips Table)]
+    O --> P[9. Similarity Search & Stitching]
+    P --> Q[10. Boundary Refinement]
+    Q --> R[11. Render: Cut + Face-Aware Vertical + ASS Captions + Single-Pass Polish]
+    R --> S[output/clip_N_final.mp4]
 ```
 
 ---
@@ -53,10 +60,11 @@ flowchart TD
 ## 📦 Tech Stack
 
 - **Core**: Python 3.10+, PyYAML, Requests, Subprocess
-- **AI & NLP**: NVIDIA NIM API (`moonshotai/kimi-k2.6` for LLM, `nvidia/nv-embedqa-e5-v5` for Embeddings)
-- **Speech-to-Text**: WhisperX / OpenAI Whisper (Word-level timestamps)
+- **LLM**: Groq API (`openai/gpt-oss-120b`, OpenAI-compatible) — campaign parsing, discovery, boundary validation, similarity classification
+- **Embeddings**: Local SentenceTransformer (`models/Qwen3-Embedding-0.6B`, 1024-dim) — no API key needed
+- **Speech-to-Text**: WhisperX (word-level timestamps) + librosa
 - **Database**: PostgreSQL 15+ with `pgvector` extension
-- **Video & Audio Processing**: FFmpeg (`libx264`, `aac`, complex filters)
+- **Video**: FFmpeg (`libx264`, `aac`), OpenCV, MediaPipe BlazeFace
 - **Web UI**: Gradio
 - **Video Downloader**: `yt-dlp`, `gdown`
 
@@ -64,17 +72,11 @@ flowchart TD
 
 ## 📋 Prerequisites
 
-Before installing, ensure your environment has:
-
-1. **Python 3.10+**:
-   ```bash
-   python3 --version
-   ```
-2. **FFmpeg** (with `libx264` and `aac` support):
+1. **Python 3.10+** (`python3 --version`)
+2. **FFmpeg** with `libx264` + `aac` (and `ass` filter for one-pass captions — included in standard builds):
    ```bash
    # macOS (Homebrew)
    brew install ffmpeg
-
    # Ubuntu / Debian
    sudo apt update && sudo apt install -y ffmpeg
    ```
@@ -83,13 +85,12 @@ Before installing, ensure your environment has:
    # macOS (Homebrew)
    brew install postgresql@16 pgvector
    brew services start postgresql@16
-
    # Ubuntu / Debian
    sudo apt install -y postgresql-16 postgresql-16-pgvector
    sudo systemctl start postgresql
    ```
-4. **NVIDIA NIM API Key**:
-   Create a free account at [build.nvidia.com](https://build.nvidia.com) to obtain your API key.
+4. **Groq API key** (LLM only — embeddings are local): free at [console.groq.com/keys](https://console.groq.com/keys).
+5. **Local embedding model**: `models/Qwen3-Embedding-0.6B` (or set `EMBED_MODEL` to a local dir / HuggingFace id; dim must match `vector(1024)` or `EMBED_DIM`).
 
 ---
 
@@ -118,32 +119,33 @@ pip install -r requirements.txt
 
 ### 4. Initialize PostgreSQL Database
 
-Create the database and apply the database schema:
-
 ```bash
 createdb viral_clips
 psql -d viral_clips -f db/schema.sql
+psql -d viral_clips -f db/migrate_embeddings_1024.sql
+psql -d viral_clips -f db/migration_v4.sql
+psql -d viral_clips -f db/migration_v5.sql
+psql -d viral_clips -f db/migration_v6.sql
 ```
 
-Verify that the `vector` extension and tables are created:
-```bash
-psql -d viral_clips -c "\dt"
-```
+Verify (`\dt` should show `videos, chunks, clips, related_segments, pipeline_runs, candidates, outlines, audio_events, edit_plans, stage_fingerprints`).
 
 ### 5. Configure Environment Variables
-
-Copy the example environment template:
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in your details:
 ```env
-# NVIDIA NIM API Credentials
-NVIDIA_API_KEY=nvapi-your-key-here
+# Groq LLM (embeddings are local — no key needed)
+GROQ_API_KEY=your_groq_api_key_here
+GROQ_MODEL=openai/gpt-oss-120b
 
-# PostgreSQL Database Configuration
+# Local embeddings (must match DB vector dim)
+EMBED_MODEL=models/Qwen3-Embedding-0.6B
+EMBED_DIM=1024
+
+# PostgreSQL
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=viral_clips
@@ -157,28 +159,26 @@ DB_PASSWORD=your_postgres_password
 
 ### Option A: Launch the Web UI
 
-Run the interactive Gradio web application:
-
 ```bash
 python ui.py
 ```
-Open your browser at `http://localhost:7862`. Paste a YouTube URL or upload a video file, select your campaign style, and generate clips with real-time visual progress.
+Open `http://localhost:7862`. Enter a URL/path, describe the campaign, pick a template + layout, generate — then fix boundaries/layouts/captions in the **Review & Correct** tab and re-render single clips.
 
 ### Option B: Run via CLI
 
-Run the full end-to-end pipeline from the terminal:
-
 ```bash
-python main.py
+python main.py "https://youtu.be/XXXX" --campaign "podcast style, add logo" --template podcast_clip --layout auto
+# --layout auto|speaker_crop|stacked_split|branded_fit   (default: auto)
+# --no-refine   # skip boundary refinement (keep analyzer timestamps)
+# --log-level DEBUG
 ```
-By default, this will prompt for or run the configured input video, extract clips, burn karaoke subtitles, and output finished vertical MP4 files in the `output/` directory.
 
-### Option C: Resume an Interrupted Pipeline
+### Option C: Re-run from embeddings (existing video)
 
-If a stage was interrupted or you want to restart from analysis:
+Dup-safe cleanup + embed→render for a video already in the DB:
 
 ```bash
-python resume.py
+python rerun_from_embed.py <video_id>
 ```
 
 ---
@@ -187,93 +187,73 @@ python resume.py
 
 ```text
 viral-clips/
-├── main.py                    # Pipeline orchestrator — runs all 8 stages
-├── ui.py                      # Interactive Gradio Web UI (port 7862)
-├── resume.py                  # Checkpoint resumption helper
-├── config.py                  # Configuration loader (config.yaml + .env)
-├── config.yaml                # Default settings for FFmpeg, chunking & AI
-├── requirements.txt           # Python package dependencies
-├── .env.example               # Environment variables template
-├── .gitignore                 # Excludes caches, venvs, and generated media
+├── main.py                    # Orchestrator — run_pipeline() 11 stages + render_clips()
+├── ui.py                      # Gradio Web UI: Generate + Review & Correct (port 7862)
+├── rerun_from_embed.py        # Dup-safe re-run helper (embed → render)
+├── preview_framing.py         # Verification: layout previews → output/previews/
+├── demo_faces.py              # Verification: synthetic face demos
+├── bench_transcribe.py        # Verification: WhisperX benchmark → output/bench_transcription.json
+├── config.py                  # Groq + embedding settings, get_config(), ffmpeg resolvers
+├── config.yaml                # All tunables: chunking/similarity/outline/discovery/audio/fusion/captions/refine/framing/...
+├── requirements.txt           # Python dependencies
+├── .env.example               # Environment template
 │
-├── campaign/                  # Natural language campaign parsing & templates
-│   ├── campaign_parser.py     # Maps user instructions to campaign settings
-│   └── templates/             # Preset configs (podcast, reaction, etc.)
+├── campaign/                  # campaign_parser.py (Groq NL→JSON) + templates/
+├── db/                        # schema.sql + migrations v4–v6, connection.py, repositories/
+├── input/                     # input_handler.py (YouTube/Drive/local/URL → raw_video.mp4)
 │
-├── db/                        # Database layer (PostgreSQL + pgvector)
-│   ├── schema.sql             # SQL schema definitions & HNSW indexes
-│   ├── connection.py          # Threaded connection pool
-│   └── repositories/          # Data access objects (video, chunk, clip, run)
+├── pipeline/                  # transcriber, chunker, embedder, outline, discovery, analyzer,
+│                              # audio_events (+classifier), fusion, similarity, boundaries,
+│                              # clipper, framing (+diarization/speakers/visual), captions,
+│                              # glossary, regen_srt, editplan, polish, review (+fallbacks)
 │
-├── input/                     # Video ingestion logic
-│   └── input_handler.py       # Supports YouTube, Drive, direct URLs, local files
-│
-├── pipeline/                  # Core video & AI processing modules
-│   ├── transcriber.py         # WhisperX transcription engine
-│   ├── chunker.py             # Semantic & silence boundary chunker
-│   ├── embedder.py            # NVIDIA NIM vector embeddings
-│   ├── analyzer.py            # NVIDIA NIM viral clip hook analyzer
-│   ├── similarity.py          # Vector search & continuation classification
-│   ├── clipper.py             # FFmpeg cut and stitch engine
-│   ├── regen_srt.py           # Per-clip synchronized SRT generation
-│   ├── fast_burn.py           # Word-level karaoke drawtext subtitle burner
-│   └── improvements.py        # Video fades, branding logos, and audio ducking
-│
-├── assets/                    # Static assets
-│   ├── logos/                 # Branding watermarks
-│   └── music/                 # Optional background tracks
-│
-├── clips/                     # Temporary cut clips & subtitles (runtime)
-├── downloads/                 # Intermediate extracted audio files (runtime)
-├── transcripts/               # Generated transcripts & analysis JSON (runtime)
-└── output/                    # Final rendered vertical clips (clip_N_final.mp4)
+├── assets/                    # logos/, music/
+├── clips/                     # Cut clips, SRTs, edit plans (runtime)
+├── downloads/                 # Extracted audio (runtime)
+├── transcripts/               # transcript.json/txt, outline.json, clips_analysis.json (runtime)
+└── output/                    # Final vertical clips + report.json
 ```
 
 ---
 
 ## ⚙️ Configuration
 
-System parameters can be adjusted in [`config.yaml`](config.yaml):
+Key `config.yaml` sections (all tunable without code edits):
 
 ```yaml
-ffmpeg:
-  path: "ffmpeg"               # System ffmpeg or custom path
-  encoder: "libx264"
-  preset: "fast"
-  crf: 23
-
-defaults:
-  min_clip_duration: 45        # Minimum clip length in seconds
-  aspect_ratio: "9:16"         # Target format for TikTok/Reels/Shorts
-  music_volume: 0.3
-  fade_duration: 0.5
-
-chunking:
-  silence_threshold_seconds: 1.2
-  max_tokens_per_chunk: 1000
-  overlap_seconds: 25
-
-similarity:
-  top_k: 3
-  threshold: 0.65
-  llm_confirmation: true
+ai: {provider: groq, llm_model: openai/gpt-oss-120b}
+embeddings: {model: models/Qwen3-Embedding-0.6B, truncate_dim: 1024}
+similarity: {top_k: 3, threshold: 0.5, max_stitch_gap_seconds: 45, max_total_seconds: 90}
+discovery: {target_clips: 8, min_span_seconds: 15, max_span_seconds: 90}  # target = maximum
+fusion: {min_score: 0.45}      # quality floor — fewer clips when quality is insufficient
+refine: {enabled: true, max_extension_seconds: 15, max_duration: 90}
+framing: {default_layout: auto, full_screen_vertical: true}  # every shot fills 9:16; branded_fit manual-only
+captions: {renderer: ass, placement: auto}
+fades: {video: true, audio: false}   # speech is never faded
+export: {consolidated: true}   # false = legacy multi-pass chain
 ```
+
+---
+
+## 🧪 Tests
+
+183/183 green (`pytest`; unit tests are fully mocked — no API/DB/FFmpeg needed). End-to-end evidence lives in `output/` snapshots (`phase0|phase1|phase4_monster`, `previews/`, `bench_transcription.json`). See `AGENT_CONTEXT.md` §8 for the full matrix and remaining unexercised-live gaps.
 
 ---
 
 ## 🛡️ Security & Privacy
 
-- **Never commit your `.env` file**. The `.gitignore` is preconfigured to prevent credentials from being committed to Git.
-- All secrets and API keys are loaded strictly via environment variables.
+- **Never commit your `.env` file**. No secrets are hardcoded — an empty `GROQ_API_KEY` triggers mock/fallback paths.
+- All secrets load strictly via environment variables.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please check out [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on code style, branch naming, and pull request procedures.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, branch naming, and PR procedures.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT — see [LICENSE](LICENSE). Face-tracking smoothing concepts in `pipeline/framing.py` are adapted from the MIT-licensed `NaufalRizqullah/opensource-clipping` (see attribution header in that file).

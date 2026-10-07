@@ -14,30 +14,76 @@ def sec_to_srt_time(sec):
 
 def generate_srt_for_clip(transcript_segments, clip_start, clip_end, clip_num):
     """Generate SRT content for a clip time range."""
-    log.debug("srt gen clip=%s range=%.1f-%.1f segs=%d", clip_num, clip_start, clip_end, len(transcript_segments))
+    return generate_srt_for_ranges(transcript_segments,
+                                   [(clip_start, clip_end)], clip_num)[0]
+
+
+def generate_srt_for_ranges(transcript_segments, ranges, clip_num):
+    """Generate SRT for ALL retained ranges with concat timeline mapping.
+
+    Args:
+        transcript_segments: transcript.json segments (with words[].start/end).
+        ranges: list of (source_start, source_end) tuples in source time.
+        clip_num: clip number (for logging).
+
+    Returns:
+        (srt_text, mapping) where mapping is a list of
+        {source_start, source_end, output_start, output_end} describing the
+        source->output timeline after gap removal (concatenation).
+
+    Words are kept when fully inside any range (+0.5s end tolerance, as
+    before) and retimed to output time so subtitles stay in sync after
+    stitching.
+    """
+    log.debug("srt gen ranges clip=%s ranges=%s segs=%d", clip_num, ranges,
+              len(transcript_segments))
+    ranges = sorted((float(a), float(b)) for a, b in ranges)
+    mapping, out_t = [], 0.0
+    for a, b in ranges:
+        d = b - a
+        mapping.append({"source_start": a, "source_end": b,
+                        "output_start": out_t, "output_end": out_t + d})
+        out_t += d
+
+    def to_output(src_t):
+        for m in mapping:
+            if m["source_start"] <= src_t <= m["source_end"] + 0.5:
+                return src_t - m["source_start"] + m["output_start"]
+        return None
+
     words = []
     for seg in transcript_segments:
         if 'words' in seg:
             for word in seg['words']:
-                if word['start'] >= clip_start and word['end'] <= clip_end + 0.5:
-                    words.append(word)
+                try:
+                    ws, we = float(word['start']), float(word['end'])
+                except (KeyError, TypeError, ValueError):
+                    continue  # missing timestamps: skip gracefully
+                inside = any(a <= ws and we <= b + 0.5 for a, b in ranges)
+                if inside:
+                    wtext = str(word.get("display", word.get("word", ""))).strip()
+                    words.append({"word": wtext, "start": ws, "end": we})
+    words.sort(key=lambda w: w["start"])
 
     srt_lines = []
     for i, word in enumerate(words, 1):
-        start_rel = word['start'] - clip_start
-        end_rel = word['end'] - clip_start
-        text = word['word'].strip()
-
+        out_s, out_e = to_output(word["start"]), to_output(word["end"])
+        if out_s is None or out_e is None:
+            continue
+        text = str(word["word"]).strip()
+        if not text:
+            continue
         srt_lines.append(f"{i}")
-        srt_lines.append(f"{sec_to_srt_time(start_rel)} --> {sec_to_srt_time(end_rel)}")
+        srt_lines.append(f"{sec_to_srt_time(max(0.0, out_s))} --> {sec_to_srt_time(max(0.0, out_e))}")
         srt_lines.append(text)
         srt_lines.append("")
 
     out = '\n'.join(srt_lines)
-    log.debug("srt gen clip=%s words=%d bytes=%d", clip_num, len(words), len(out))
+    log.debug("srt gen ranges clip=%s words=%d bytes=%d ranges=%d", clip_num,
+              len(words), len(out), len(ranges))
     if not words:
-        log.warning("srt gen clip=%s no words in range", clip_num)
-    return out
+        log.warning("srt gen clip=%s no words in ranges", clip_num)
+    return out, mapping
 
 def main():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

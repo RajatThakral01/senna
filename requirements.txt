@@ -9,4 +9,11 @@ pyyaml
 python-dotenv
 psycopg2-binary>=2.9.9
 pgvector>=0.2.5
+sentence-transformers>=2.2.0
+opencv-python>=4.8.0
+# Face detection (MediaPipe BlazeFace short-range; ~230KB model auto-downloaded
+# to models/ on first use — see pipeline/framing.py get_detector()).
+# Pinned to a version with the tasks.vision API; Haarcascade fallback is used
+# when mediapipe is absent so branded_fit still works without it.
+mediapipe>=0.10.9
 pytest

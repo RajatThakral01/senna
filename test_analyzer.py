@@ -1,110 +1,101 @@
-# test_analyzer.py
-import pytest
+# test_analyzer.py — tests for the current pipeline/analyzer.py API.
 import os
 import sys
-import json
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(__file__))
-from pipeline.analyzer import analyze_transcript, build_transcript_text, format_time
+from pipeline.analyzer import (
+    format_time, to_sec, extract_json_from_response,
+    _extract_clips_from_chunk, _deduplicate_clips,
+)
 
 
-class TestAnalyzer:
+def _llm_response(content):
+    mock_response = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": content}}]
+    }
+    mock_response.raise_for_status.return_value = None
+    return mock_response
+
+
+class TestAnalyzerHelpers:
     def test_format_time(self):
         assert format_time(0) == "00:00:00"
         assert format_time(125) == "00:02:05"
         assert format_time(3695) == "01:01:35"
 
-    def test_build_transcript_text(self):
-        mock_result = {
-            "segments": [
-                {"start": 0.0, "end": 5.0, "text": "Hello world"},
-                {"start": 5.0, "end": 10.0, "text": "This is a test"},
-                {"start": 10.0, "end": 15.0, "text": "Testing one two three"}
-            ]
-        }
-        text = build_transcript_text(mock_result)
+    def test_to_sec(self):
+        assert to_sec("00:01:00") == 60
+        assert to_sec("01:30.5") == 90.5
 
-        assert "[00:00:00 --> 00:00:05] Hello world" in text
-        assert "[00:00:05 --> 00:00:10] This is a test" in text
-        assert "[00:00:10 --> 00:00:15] Testing one two three" in text
+    def test_extract_json_plain_array(self):
+        raw = '[{"start_time": "00:01:00", "end_time": "00:01:30"}]'
+        assert extract_json_from_response(raw) == raw
 
-    def test_build_transcript_text_empty(self):
-        mock_result = {"segments": []}
-        text = build_transcript_text(mock_result)
-        assert text == ""
+    def test_extract_json_markdown_fences(self):
+        raw = '```json\n[{"start_time": "00:01:00"}]\n```'
+        out = extract_json_from_response(raw)
+        assert "```" not in out
+        assert "start_time" in out
 
-    @patch("analyzer.requests.post")
-    @patch("analyzer.json.loads")
-    def test_analyze_transcript_success(self, mock_json_loads, mock_post):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": '{"clip_number": 1}'}}]
-        }
-        mock_post.return_value = mock_response
-        mock_json_loads.return_value = [
-            {
-                "clip_number": 1,
-                "start_time": "00:01:00",
-                "end_time": "00:01:30",
-                "duration_seconds": 30,
-                "hook": "Test hook",
-                "reason": "Test reason",
-                "suggested_title": "Test Title",
-                "suggested_hashtags": "#test #viral"
-            }
-        ]
+    def test_extract_json_think_block(self):
+        raw = '<think>reasoning here</think>\n[{"start_time": "00:01:00"}]'
+        out = extract_json_from_response(raw)
+        assert "<think>" not in out
+        assert "start_time" in out
 
-        mock_transcript = {
-            "segments": [
-                {"start": 0.0, "end": 5.0, "text": "Hello"}
-            ]
-        }
 
-        with patch("analyzer.build_transcript_text", return_value="mock transcript"):
-            with patch("builtins.open", MagicMock()):
-                clips = analyze_transcript(mock_transcript)
+class TestExtractClips:
+    def _chunk(self):
+        return {"chunk_index": 0, "start_time": 0.0, "end_time": 120.0,
+                "text": "Hello world. This is a test of the clip extractor."}
 
+    @patch("pipeline.analyzer.requests.post")
+    def test_success(self, mock_post):
+        mock_post.return_value = _llm_response(
+            '[{"start_time": "00:01:00", "end_time": "00:01:30", '
+            '"hook": "Test hook", "reason": "Test reason", '
+            '"suggested_title": "Test Title", "suggested_hashtags": "#test #viral"}]')
+        clips = _extract_clips_from_chunk(self._chunk(), {})
         assert len(clips) == 1
-        assert clips[0]["clip_number"] == 1
-        assert clips[0]["start_time"] == "00:01:00"
+        assert clips[0]["hook"] == "Test hook"
+        assert clips[0]["duration_seconds"] == 30
 
-    @patch("analyzer.requests.post")
-    def test_analyze_transcript_api_error(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.status_code = 401
-        mock_response.text = "Unauthorized"
-        mock_post.return_value = mock_response
+    @patch("pipeline.analyzer.requests.post")
+    def test_short_clip_dropped(self, mock_post):
+        mock_post.return_value = _llm_response(
+            '[{"start_time": "00:01:00", "end_time": "00:01:05", "hook": "x"}]')
+        assert _extract_clips_from_chunk(self._chunk(), {}) == []
 
-        mock_transcript = {"segments": []}
+    @patch("pipeline.analyzer.requests.post")
+    def test_api_error_returns_empty(self, mock_post):
+        import requests as _rq
+        mock_post.side_effect = _rq.exceptions.ConnectionError("down")
+        assert _extract_clips_from_chunk(self._chunk(), {}) == []
 
-        with pytest.raises(Exception) as exc_info:
-            analyze_transcript(mock_transcript)
+    @patch("pipeline.analyzer.requests.post")
+    def test_empty_response_returns_empty(self, mock_post):
+        mock_post.return_value = _llm_response('')
+        assert _extract_clips_from_chunk(self._chunk(), {}) == []
 
-        assert "401" in str(exc_info.value)
 
-    @patch("analyzer.requests.post")
-    @patch("analyzer.json.loads")
-    def test_analyze_transcript_cleans_markdown_fences(self, mock_json_loads, mock_post):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": "```json\n{\"clip_number\": 1}\n```"}}]
-        }
-        mock_post.return_value = mock_response
-        mock_json_loads.return_value = [
-            {"clip_number": 1, "start_time": "00:00:00", "end_time": "00:00:30",
-             "hook": "Test", "reason": "Test", "suggested_title": "Test", "suggested_hashtags": "#test"}
+class TestDeduplicate:
+    def test_keeps_longer_on_near_start(self):
+        clips = [
+            {"start_time": "00:01:00", "end_time": "00:01:30", "duration_seconds": 30},
+            {"start_time": "00:01:02", "end_time": "00:02:00", "duration_seconds": 58},
         ]
+        out = _deduplicate_clips(clips, overlap_threshold_seconds=5.0)
+        assert len(out) == 1
+        assert out[0]["duration_seconds"] == 58
 
-        mock_transcript = {"segments": []}
+    def test_keeps_distinct(self):
+        clips = [
+            {"start_time": "00:01:00", "end_time": "00:01:30", "duration_seconds": 30},
+            {"start_time": "00:05:00", "end_time": "00:05:30", "duration_seconds": 30},
+        ]
+        assert len(_deduplicate_clips(clips, overlap_threshold_seconds=5.0)) == 2
 
-        with patch("analyzer.build_transcript_text", return_value=""):
-            with patch("builtins.open", MagicMock()):
-                analyze_transcript(mock_transcript)
-
-        mock_json_loads.assert_called_once()
-        call_arg = mock_json_loads.call_args[0][0]
-        assert "clip_number" in call_arg
-        assert "```" not in call_arg
+    def test_empty(self):
+        assert _deduplicate_clips([], overlap_threshold_seconds=5.0) == []

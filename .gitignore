@@ -67,6 +67,15 @@ transcripts/*
 !transcripts/.gitkeep
 temp/
 
+# --- Local Models (large, downloaded separately) ---
+models/*
+!models/.gitkeep
+
+# --- Staged runtime font (copied from system fonts on first subtitle burn) ---
+assets/fonts/*.ttf
+assets/fonts/*.ttc
+assets/fonts/*.otf
+
 # Ignore raw video input binaries (preserve python source files in input/)
 input/*.mp4
 input/*.mov

@@ -4,5 +4,6 @@
   "fade": true,
   "split_screen": true,
   "music": null,
-  "min_clip_duration": 30
+  "min_clip_duration": 30,
+  "layout": "stacked_split"
 }

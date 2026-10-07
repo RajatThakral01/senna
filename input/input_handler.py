@@ -1,12 +1,26 @@
 import os
 import shutil
 import subprocess
+import sys
 import time
 import gdown
 import requests
 from logger import get_logger
+from config import ffmpeg_path as _ffmpeg_bin
 
 log = get_logger("input")
+
+def _ytdlp():
+    """yt-dlp invocation bound to this interpreter (no PATH dependency)."""
+    return [sys.executable, '-m', 'yt_dlp']
+
+def _ffmpeg_location_args() -> list:
+    """['--ffmpeg-location', dir] when ffmpeg resolves to a real file, else []."""
+    exe = _ffmpeg_bin()
+    loc = os.path.dirname(exe)
+    if loc and os.path.exists(os.path.join(loc, os.path.basename(exe))):
+        return ['--ffmpeg-location', loc]
+    return []  # ffmpeg on PATH — yt-dlp finds it itself
 
 def detect_source_type(input_string: str) -> str:
     if "youtube.com" in input_string or "youtu.be" in input_string:
@@ -47,13 +61,11 @@ def _handle_youtube(url: str):
     log.info("youtube download start url=%.100s", url)
     t0 = time.monotonic()
     OUTPUT_PATH = "input/raw_video.mp4"
-    # Using the same pattern as the project's downloader.py
-    ffmpeg_path = os.path.expanduser('~/miniforge3/bin/')
     cmd = [
-        'yt-dlp',
+        *_ytdlp(),
         '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
         '--merge-output-format', 'mp4',
-        '--ffmpeg-location', ffmpeg_path,
+        *_ffmpeg_location_args(),
         '--retries', '3',
         '-o', OUTPUT_PATH,
         url
@@ -63,11 +75,11 @@ def _handle_youtube(url: str):
     except subprocess.CalledProcessError as e1:
         log.warning("youtube-hq failed, retrying via android client (360p)")
         fallback = [
-            'yt-dlp',
+            *_ytdlp(),
             '--extractor-args', 'youtube:player_client=android',
             '-f', 'best',
             '--merge-output-format', 'mp4',
-            '--ffmpeg-location', ffmpeg_path,
+            *_ffmpeg_location_args(),
             '--retries', '3',
             '-o', OUTPUT_PATH,
             url
@@ -90,14 +102,13 @@ def _handle_youtube_live(url: str):
     log.info("youtube-live record start (max 300s) url=%.100s", url)
     t0 = time.monotonic()
     OUTPUT_PATH = "input/raw_video.mp4"
-    ffmpeg_path = os.path.expanduser('~/miniforge3/bin/')
     cmd = [
-        'yt-dlp',
+        *_ytdlp(),
         '--live-from-start',
         '--merge-output-format', 'mp4',
         '--downloader', 'ffmpeg',
         '--downloader-args', 'ffmpeg_i:-t 300',
-        '--ffmpeg-location', ffmpeg_path,
+        *_ffmpeg_location_args(),
         '-o', OUTPUT_PATH,
         url
     ]

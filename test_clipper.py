@@ -16,7 +16,7 @@ class TestClipper:
         assert time_to_seconds("01:30:30") == 5430
         assert time_to_seconds("00:05:15") == 315
 
-    @patch("clipper.subprocess.run")
+    @patch("pipeline.clipper.subprocess.run")
     def test_cut_clips_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
@@ -32,7 +32,7 @@ class TestClipper:
             }
         ]
 
-        with patch("clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
+        with patch("pipeline.clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
             result = cut_clips("video.mp4", clips, "clips")
 
         assert len(result) == 1
@@ -40,7 +40,7 @@ class TestClipper:
         assert "clip_1.mp4" in result[0]["path"]
         mock_run.assert_called_once()
 
-    @patch("clipper.subprocess.run")
+    @patch("pipeline.clipper.subprocess.run")
     def test_cut_clips_ffmpeg_error(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stderr="Error")
 
@@ -56,12 +56,12 @@ class TestClipper:
             }
         ]
 
-        with patch("clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
+        with patch("pipeline.clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
             result = cut_clips("video.mp4", clips, "clips")
 
         assert len(result) == 0
 
-    @patch("clipper.subprocess.run")
+    @patch("pipeline.clipper.subprocess.run")
     def test_cut_clips_multiple(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stderr="")
 
@@ -71,7 +71,7 @@ class TestClipper:
             {"clip_number": 3, "start_time": "00:02:00", "end_time": "00:02:30", "hook": "", "suggested_title": "", "suggested_hashtags": "", "reason": ""},
         ]
 
-        with patch("clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
+        with patch("pipeline.clipper.os.path.join", side_effect=lambda *args: "/".join(args)):
             result = cut_clips("video.mp4", clips, "clips")
 
         assert len(result) == 3

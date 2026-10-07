@@ -82,11 +82,15 @@ def get_chunks_for_video(video_id: str) -> list:
 
 
 def find_similar_chunks(query_embedding: list, video_id: str,
-                        top_k: int = 5, threshold: float = 0.80) -> list:
+                        top_k: int = 5, threshold: float = 0.50) -> list:
     """
-    pgvector ANN search: find top_k chunks from the same video whose cosine
-    similarity to query_embedding is above threshold.
-    Excludes chunks with NULL embeddings.
+    pgvector ANN search: top_k nearest chunks of the same video by cosine
+    distance (HNSW index), then apply the similarity threshold in Python.
+
+    The threshold is NOT a computed expression in WHERE — wrapping the
+    distance operator in a predicate defeats index-assisted ordering and
+    recomputes the distance. ORDER BY + LIMIT k uses the index; filtering
+    a handful of rows in Python is free.
 
     Returns a list of dicts with keys:
         id, chunk_index, start_time, end_time, text, similarity (float 0-1)
@@ -101,11 +105,9 @@ def find_similar_chunks(query_embedding: list, video_id: str,
                 FROM chunks
                 WHERE video_id = %s
                   AND embedding IS NOT NULL
-                  AND 1 - (embedding <=> %s::vector) >= %s
                 ORDER BY embedding <=> %s::vector ASC
                 LIMIT %s
             """, (query_embedding, video_id,
-                  query_embedding, threshold,
                   query_embedding, top_k))
             cols = [d[0] for d in cur.description]
             rows = []
@@ -114,7 +116,9 @@ def find_similar_chunks(query_embedding: list, video_id: str,
                 # Ensure id is a plain string
                 d["id"] = str(d["id"])
                 rows.append(d)
-            log.debug("vector search hits=%d", len(rows))
+            before = len(rows)
+            rows = [r for r in rows if (r.get("similarity") or 0) >= threshold]
+            log.debug("vector search candidates=%d kept=%d thr=%.2f", before, len(rows), threshold)
             return rows
     except Exception:
         log.exception("vector search failed")

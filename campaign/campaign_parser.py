@@ -26,6 +26,7 @@ JSON schema:
   "music_volume": "float between 0.1-0.5 (default 0.3 if music mentioned, else null)",
   "split_screen": "boolean (true only if explicitly mentioned)",
   "split_screen_source": "null always for now",
+  "layout": "auto | speaker_crop | stacked_split | center_crop | branded_fit (default auto; stacked_split only for split-screen/stacked, speaker_crop for face-tracked crop, center_crop for static centre crop, branded_fit only when the user explicitly wants a fitted frame — it renders as a crop while full_screen_vertical is on)",
   "subtitles": "boolean (default true unless user says no subtitles)",
   "subtitle_style": "karaoke | standard | null",
   "aspect_ratio": "9:16 | 16:9 | 1:1 (default 9:16)",
@@ -34,6 +35,26 @@ JSON schema:
   "min_clip_duration": "integer seconds (default 45)"
 }
 """
+
+def default_campaign() -> dict:
+    """Static safe default: subtitles on, 9:16 karaoke, fades on, no branding."""
+    return validate_campaign_config({
+        "campaign_id": "default",
+        "logo": None,
+        "logo_position": None,
+        "music": None,
+        "music_volume": None,
+        "split_screen": False,
+        "split_screen_source": None,
+        "layout": "auto",
+        "subtitles": True,
+        "subtitle_style": "karaoke",
+        "aspect_ratio": "9:16",
+        "template": None,
+        "fade": True,
+        "min_clip_duration": 45,
+    })
+
 
 def parse_campaign(description: str, available_assets: dict) -> dict:
     """
@@ -56,7 +77,7 @@ Match mentioned assets to available files. If a specific file is not mentioned
 but a type is (e.g., "add logo"), use the first available one.
 Return only the JSON config.
 """
-    if not LLM_API_KEY or LLM_API_KEY == "your_nvidia_api_key_here":
+    if not LLM_API_KEY or LLM_API_KEY in ("your_groq_api_key_here", "your_grok_api_key_here", "your_nvidia_api_key_here", "your_minimax_api_key_here"):
         log.warning("LLM key missing, returning mock campaign config")
         # Return a mock response for testing without a real API key
         mock_config = {
@@ -79,9 +100,18 @@ Return only the JSON config.
             mock_config["template"] = "motivational_reel"
         if "reaction" in description:
             mock_config["template"] = "tiktok_reaction"
+        lowered = description.lower()
+        if "stacked" in lowered or "split-screen" in lowered or "split screen" in lowered:
+            mock_config["layout"] = "stacked_split"
+        elif "speaker crop" in lowered or "face-track" in lowered or "face track" in lowered:
+            mock_config["layout"] = "speaker_crop"
+        elif "branded" in lowered or "full frame" in lowered:
+            mock_config["layout"] = "branded_fit"
+        else:
+            mock_config["layout"] = "auto"
         log.info("parse_campaign mock done logo=%s subtitles=%s template=%s",
                  mock_config.get("logo"), mock_config.get("subtitles"), mock_config.get("template"))
-        return mock_config
+        return validate_campaign_config(mock_config)
 
 
     t0 = time.monotonic()
@@ -105,6 +135,11 @@ Return only the JSON config.
         response.raise_for_status()
     except Exception:
         log.exception("parse_campaign LLM request failed")
+        if not (description or "").strip():
+            # Empty description + API failure (e.g. 429): fall back to safe
+            # defaults so render/resume paths stay functional.
+            log.warning("empty campaign + API error -> default campaign config")
+            return default_campaign()
         raise
 
     raw = response.json()["choices"][0]["message"]["content"].strip()
@@ -120,7 +155,26 @@ Return only the JSON config.
 
     config = json.loads(raw)
     config["campaign_id"] = str(uuid.uuid4())[:8]
+    config = validate_campaign_config(config)
     log.info("parse_campaign done id=%s logo=%s music=%s subtitles=%s elapsed=%.1fs",
              config.get("campaign_id"), config.get("logo"), config.get("music"),
              config.get("subtitles"), time.monotonic() - t0)
+    return config
+
+
+SUPPORTED_LAYOUTS = ("auto", "speaker_crop", "stacked_split", "center_crop",
+                     "branded_fit")
+
+
+def validate_campaign_config(config: dict) -> dict:
+    """Validate campaign config against supported layout values (in-place)."""
+    layout = str(config.get("layout") or "auto").strip().lower()
+    if layout not in SUPPORTED_LAYOUTS:
+        log.warning("campaign layout '%s' unsupported, using 'auto'", config.get("layout"))
+        layout = "auto"
+    config["layout"] = layout
+    # legacy split_screen flag maps to stacked_split unless layout set explicitly
+    if config.get("split_screen") and not config.get("_layout_explicit"):
+        if layout == "auto":
+            config["layout"] = "stacked_split"
     return config

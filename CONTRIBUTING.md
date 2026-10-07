@@ -24,14 +24,18 @@ Thank you for your interest in contributing to **Viral Clips Automator**! We wel
    ```
 
 4. **Set Up PostgreSQL & pgvector**:
-   Ensure PostgreSQL is installed and running, then execute the schema:
-   ```bash
-   createdb viral_clips
-   psql viral_clips -f db/schema.sql
-   ```
+    Ensure PostgreSQL is installed and running, then execute the schema and migrations in order:
+    ```bash
+    createdb viral_clips
+    psql viral_clips -f db/schema.sql
+    psql viral_clips -f db/migrate_embeddings_1024.sql
+    psql viral_clips -f db/migration_v4.sql
+    psql viral_clips -f db/migration_v5.sql
+    psql viral_clips -f db/migration_v6.sql
+    ```
 
 5. **Configure Environment Variables**:
-   Copy `.env.example` to `.env` and fill in your NVIDIA NIM credentials and database connection details:
+    Copy `.env.example` to `.env` and fill in your Groq API key (LLM only — embeddings run locally) and database connection details:
    ```bash
    cp .env.example .env
    ```
