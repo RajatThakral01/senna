@@ -112,12 +112,16 @@ def main():
     by_no = {c["clip_number"]: c for c in report}
     ok, issues = True, []
     for n in numbers:
+        c = by_no[n]
+        if c.get("refine_status") == "rejected":
+            print(f"--- clip {n}: SKIPPED (rejected: "
+                  f"{(c.get('refine_reason') or '')[:100]}) ---")
+            continue
         final = f"output/clip_{n}_final.mp4"
         info = probe(final)
         v = [s for s in info["streams"] if s["codec_type"] == "video"][0]
         a = [s for s in info["streams"] if s["codec_type"] == "audio"]
         dur = float(info["format"]["duration"])
-        c = by_no[n]
         edges = edge_uniformity(final, src_path=f"clips/clip_{n}.mp4")
         flat = [k for k, s in edges.items() if 0 <= s < 0.5]
         checks = {

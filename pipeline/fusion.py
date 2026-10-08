@@ -283,8 +283,9 @@ def rank_and_select(candidates, campaign_text="", cfg=None):
                 skipped.append((rest, rest["fusion_reason"]))
             break
     report = {
-        "merged": [(d[0].get("hook", "")[:80], d[1].get("hook", "")[:80]) for d in dropped],
-        "skipped": [(c.get("hook", "")[:80], reason) for c, reason in skipped],
+        "merged": [((d[0].get("hook") or "")[:80], (d[1].get("hook") or "")[:80])
+                   for d in dropped],
+        "skipped": [((c.get("hook") or "")[:80], reason) for c, reason in skipped],
         "selected_scores": [c["scores"]["total"] for c in selected],
         "elapsed": round(time.monotonic() - t0, 2),
     }

@@ -77,7 +77,8 @@ Match mentioned assets to available files. If a specific file is not mentioned
 but a type is (e.g., "add logo"), use the first available one.
 Return only the JSON config.
 """
-    if not LLM_API_KEY or LLM_API_KEY in ("your_groq_api_key_here", "your_grok_api_key_here", "your_nvidia_api_key_here", "your_minimax_api_key_here"):
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable():
         log.warning("LLM key missing, returning mock campaign config")
         # Return a mock response for testing without a real API key
         mock_config = {
@@ -131,8 +132,10 @@ Return only the JSON config.
         "Content-Type": "application/json"
     }
     try:
-        response = requests.post(LLM_API_URL, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
+        from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+        response = post_chat(payload, timeout=60,
+                             slot=SLOT_FOR_STAGE["campaign"],
+                             purpose="campaign")
     except Exception:
         log.exception("parse_campaign LLM request failed")
         if not (description or "").strip():

@@ -71,7 +71,7 @@ outline:
 
 # ── Contextual discovery (Phase-1 pass 2) ────────────────────────────────────
 discovery:
-  target_clips: 8        # desired selected clips (Phase 3 treats as target/max)
+  target_clips: 15       # desired selected clips (Phase 3 treats as target/max)
   max_candidates: 24     # cap on validated candidates kept in the pool
   sentences_per_call: 120  # transcript sentences per discovery LLM call
   min_span_seconds: 15    # candidate spans shorter than this are rejected

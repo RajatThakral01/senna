@@ -237,7 +237,7 @@ export: {consolidated: true}   # false = legacy multi-pass chain
 
 ## 🧪 Tests
 
-183/183 green (`pytest`; unit tests are fully mocked — no API/DB/FFmpeg needed). End-to-end evidence lives in `output/` snapshots (`phase0|phase1|phase4_monster`, `previews/`, `bench_transcription.json`). See `AGENT_CONTEXT.md` §8 for the full matrix and remaining unexercised-live gaps.
+208/208 green (`pytest`; unit tests are fully mocked — no API/DB/FFmpeg needed). `validate_fullscreen.py` checks real renders (dims, audio, duration, static-fill scan, crop-debug previews).
 
 ---
 

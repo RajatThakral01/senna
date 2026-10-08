@@ -37,7 +37,12 @@ class TestCampaignParser(unittest.TestCase):
 
     def _force_mock_path(self):
         # Force the internal mock config regardless of .env contents
-        return patch.object(campaign_parser, "LLM_API_KEY", "your_groq_api_key_here")
+        # (the key pool reads env live, so blank all slots)
+        return patch.dict(os.environ, {"GROQ_API_KEY": "",
+                                       "GROQ_API_KEY_2": "",
+                                       "GROQ_API_KEY_3": "",
+                                       "GROQ_API_KEY_FALLBACK": "",
+                                       "GROQ_API_KEY_4": ""})
 
     def test_parse_campaign_with_mock_api(self):
         print("Testing campaign parser with internal mock...")

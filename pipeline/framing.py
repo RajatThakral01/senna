@@ -1012,14 +1012,24 @@ def render_vertical(input_path, output_path, layout="auto", cfg=None,
         except BrokenPipeError:
             break
     cap.release()
+    # hard fail on truncation: a short write must never pass silently
+    # (main.py falls back to a full-length static crop on any exception)
+    expected = int(round((analysis.get("duration", 0.0) or 0.0) * fps))
+    rc = None
     try:
         proc.stdin.close()
-        proc.wait(timeout=120)
+        rc = proc.wait(timeout=120)
     except Exception:
         try:
             proc.kill()
         except Exception:
             pass
+    if rc not in (0, None):
+        raise RuntimeError(f"framing encoder exited rc={rc} after {i} frames")
+    if expected > 0 and i < int(expected * 0.95):
+        raise RuntimeError(
+            f"framing truncated: wrote {i}/{expected} frames "
+            f"(source {analysis.get('width')}x{analysis.get('height')})")
     # mux original audio (speech fade-out disabled by default; see improvements)
     try:
         r = subprocess.run(

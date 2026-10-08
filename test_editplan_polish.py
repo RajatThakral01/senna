@@ -128,10 +128,20 @@ class TestCmd:
 
 
 class TestProbe:
-    def test_real_file(self):
-        info = probe_streams("input/raw_video.mp4")
+    def test_real_file(self, tmp_path):
+        import subprocess
+        from config import ffmpeg_path
+        p = str(tmp_path / "probe.mp4")
+        subprocess.run(
+            [ffmpeg_path(), "-y",
+             "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=25:duration=1",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-c:v", "libx264", "-c:a", "aac", "-shortest", p],
+            capture_output=True, check=True)
+        info = probe_streams(p)
         assert info["has_video"] and info["has_audio"]
-        assert info["width"] == 3840 and info["duration"] > 300
+        assert (info["width"], info["height"]) == (1280, 720)
+        assert info["duration"] > 0
 
     def test_missing_file(self):
         info = probe_streams("no/such/file.mp4")

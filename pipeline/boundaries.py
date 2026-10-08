@@ -192,7 +192,8 @@ def _llm_validate(clip, sentences_in_window, cfg):
         from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
     except Exception:
         return None
-    if not LLM_API_KEY:
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable():
         log.debug("boundaries LLM skipped (no key)")
         return None
     if not cfg.get("llm_validation", True):
@@ -218,18 +219,12 @@ def _llm_validate(clip, sentences_in_window, cfg):
         '"complete": <true|false>, "reason": "<short reason>"}'
     )
     try:
-        import requests
-        r = requests.post(LLM_API_URL,
-                          headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                                   "Content-Type": "application/json"},
-                          json={"model": LLM_MODEL, "temperature": 0.1,
-                                "max_tokens": 400,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=60)
-        if r.status_code == 429:
-            log.warning("boundaries LLM rate-limited, using deterministic fallback")
-            return None
-        r.raise_for_status()
+        from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+        r = post_chat({"model": LLM_MODEL, "temperature": 0.1,
+                       "max_tokens": 400,
+                       "messages": [{"role": "user", "content": prompt}]},
+                      timeout=60, slot=SLOT_FOR_STAGE["boundaries"],
+                      purpose="boundaries")
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()

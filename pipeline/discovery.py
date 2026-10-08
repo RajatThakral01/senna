@@ -71,22 +71,17 @@ def _llm_discover(prompt, cfg):
         from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
     except Exception:
         return None
-    if not LLM_API_KEY:
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable():
         return None
     try:
         import re
-        import requests
-        r = requests.post(LLM_API_URL,
-                          headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                                   "Content-Type": "application/json"},
-                          json={"model": LLM_MODEL, "temperature": 0.3,
-                                "max_tokens": 3000,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=180)
-        if r.status_code == 429:
-            log.warning("discovery LLM rate-limited")
-            return None
-        r.raise_for_status()
+        from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+        r = post_chat({"model": LLM_MODEL, "temperature": 0.3,
+                       "max_tokens": 3000,
+                       "messages": [{"role": "user", "content": prompt}]},
+                      timeout=180, slot=SLOT_FOR_STAGE["discovery"],
+                      purpose="discovery")
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()

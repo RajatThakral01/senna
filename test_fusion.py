@@ -172,3 +172,16 @@ class TestPostRefineDedup:
         ]
         kept, dropped = deduplicate_refined(clips)
         assert len(kept) == 2 and not dropped
+
+
+class TestNoneHookReport:
+    def test_none_hooks_do_not_crash_report(self):
+        # Regression: audio cues with hook=None crashed the merged/skipped
+        # report with TypeError: 'NoneType' object is not subscriptable.
+        cands = [_c(0, 30, hook=None), _c(1, 31, hook=None),
+                 _c(100, 130, hook=None)]
+        selected, report = rank_and_select(
+            cands, "", cfg={"discovery": {"target_clips": 8},
+                            "fusion": {"min_score": 0.0}})
+        assert isinstance(report["merged"], list)
+        assert isinstance(report["skipped"], list)

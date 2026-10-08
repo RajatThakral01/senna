@@ -58,7 +58,8 @@ def _llm_section_outline(window, window_idx, cfg):
         from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
     except Exception:
         return None
-    if not LLM_API_KEY:
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable():
         return None
     lines = []
     for s in window:
@@ -79,18 +80,12 @@ def _llm_section_outline(window, window_idx, cfg):
     )
     try:
         import re
-        import requests
-        r = requests.post(LLM_API_URL,
-                          headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                                   "Content-Type": "application/json"},
-                          json={"model": LLM_MODEL, "temperature": 0.2,
-                                "max_tokens": 2000,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=120)
-        if r.status_code == 429:
-            log.warning("outline LLM rate-limited (window %d)", window_idx)
-            return None
-        r.raise_for_status()
+        from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+        r = post_chat({"model": LLM_MODEL, "temperature": 0.2,
+                       "max_tokens": 2000,
+                       "messages": [{"role": "user", "content": prompt}]},
+                      timeout=120, slot=SLOT_FOR_STAGE["outline"],
+                      purpose="outline")
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()
@@ -134,7 +129,8 @@ def _combine_outlines(section_outlines, cfg):
         from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
     except Exception:
         return None
-    if not LLM_API_KEY or not section_outlines:
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable() or not section_outlines:
         return None
     lines = []
     for i, s in enumerate(section_outlines):
@@ -150,17 +146,12 @@ def _combine_outlines(section_outlines, cfg):
     )
     try:
         import re
-        import requests
-        r = requests.post(LLM_API_URL,
-                          headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                                   "Content-Type": "application/json"},
-                          json={"model": LLM_MODEL, "temperature": 0.2,
-                                "max_tokens": 800,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=120)
-        if r.status_code == 429:
-            return None
-        r.raise_for_status()
+        from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+        r = post_chat({"model": LLM_MODEL, "temperature": 0.2,
+                       "max_tokens": 800,
+                       "messages": [{"role": "user", "content": prompt}]},
+                      timeout=120, slot=SLOT_FOR_STAGE["outline"],
+                      purpose="outline-combine")
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()

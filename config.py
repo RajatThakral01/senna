@@ -21,11 +21,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Groq LLM ───────────────────────────────────────────────────────────────────
-# Paste your key into .env as GROQ_API_KEY. Model name is also set via .env
-# so you can swap models without touching code.
+# Paste your keys into .env as GROQ_API_KEY .. GROQ_API_KEY_FALLBACK.
+# Workload split (see pipeline/llm_client.py): key1 = outline/discovery/enrich,
+# key2 = similarity, key3 = campaign/analyzer/boundaries, key4 = fallback.
+# Model name is also set via .env so you can swap models without touching code.
 # (GROK_API_KEY / XAI_API_KEY accepted as legacy aliases from the xAI chapter.)
 GROQ_API_KEY = os.getenv(
     "GROQ_API_KEY", os.getenv("GROK_API_KEY", os.getenv("XAI_API_KEY", ""))
+)
+GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2", "")
+GROQ_API_KEY_3 = os.getenv("GROQ_API_KEY_3", "")
+GROQ_API_KEY_FALLBACK = os.getenv(
+    "GROQ_API_KEY_FALLBACK", os.getenv("GROQ_API_KEY_4", "")
 )
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")

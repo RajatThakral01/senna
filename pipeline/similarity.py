@@ -117,25 +117,15 @@ Respond ONLY with a JSON object. No other text. No markdown fences.
     max_retries = 4
     for attempt in range(max_retries):
         try:
-            response = requests.post(
-                LLM_API_URL,
-                headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                         "Content-Type": "application/json"},
-                json={
+            from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+            response = post_chat(
+                {
                     "model": LLM_MODEL,
                     "temperature": 0.1,
                     "messages": [{"role": "user", "content": prompt}],
                 },
-                timeout=30,
-            )
-            # 429 = Groq rate limit — back off and retry (free-tier bursts)
-            if response.status_code == 429:
-                wait = 10 * (attempt + 1)
-                log.warning("LLM 429 rate-limited attempt %d/%d, waiting %ds",
-                            attempt + 1, max_retries, wait)
-                time.sleep(wait)
-                continue
-            response.raise_for_status()
+                timeout=30, slot=SLOT_FOR_STAGE["similarity"],
+                purpose="similarity")
             raw = response.json()["choices"][0]["message"]["content"]
 
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()

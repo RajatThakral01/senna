@@ -239,12 +239,13 @@ def enrich_event_candidates(candidates, cfg=None):
         from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
     except Exception:
         return candidates
-    if not LLM_API_KEY:
+    from pipeline.llm_client import pool_usable as _pool_usable
+    if not _pool_usable():
         log.info("event enrich skipped (no LLM key)")
         return candidates
     import json as _json
     import re
-    import requests
+    from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
     items = []
     for i, c in enumerate(candidates):
         items.append(f"[{i}] range {c['source_ranges'][0]} "
@@ -258,17 +259,11 @@ def enrich_event_candidates(candidates, cfg=None):
         'Return ONLY JSON: {"0": {"hook": "...", "main_idea": "...", "payoff": "..."}, ...}'
     )
     try:
-        r = requests.post(LLM_API_URL,
-                          headers={"Authorization": f"Bearer {LLM_API_KEY}",
-                                   "Content-Type": "application/json"},
-                          json={"model": LLM_MODEL, "temperature": 0.3,
-                                "max_tokens": 2000,
-                                "messages": [{"role": "user", "content": prompt}]},
-                          timeout=120)
-        if r.status_code == 429:
-            log.warning("event enrich rate-limited")
-            return candidates
-        r.raise_for_status()
+        r = post_chat({"model": LLM_MODEL, "temperature": 0.3,
+                       "max_tokens": 2000,
+                       "messages": [{"role": "user", "content": prompt}]},
+                      timeout=120, slot=SLOT_FOR_STAGE["enrich"],
+                      purpose="audio-enrich")
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()

@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from pipeline.analyzer import (
     format_time, to_sec, extract_json_from_response,
     _extract_clips_from_chunk, _deduplicate_clips,
+    _split_ids_by_time,
 )
 
 
@@ -51,7 +52,7 @@ class TestExtractClips:
         return {"chunk_index": 0, "start_time": 0.0, "end_time": 120.0,
                 "text": "Hello world. This is a test of the clip extractor."}
 
-    @patch("pipeline.analyzer.requests.post")
+    @patch("pipeline.llm_client.requests.post")
     def test_success(self, mock_post):
         mock_post.return_value = _llm_response(
             '[{"start_time": "00:01:00", "end_time": "00:01:30", '
@@ -62,19 +63,19 @@ class TestExtractClips:
         assert clips[0]["hook"] == "Test hook"
         assert clips[0]["duration_seconds"] == 30
 
-    @patch("pipeline.analyzer.requests.post")
+    @patch("pipeline.llm_client.requests.post")
     def test_short_clip_dropped(self, mock_post):
         mock_post.return_value = _llm_response(
             '[{"start_time": "00:01:00", "end_time": "00:01:05", "hook": "x"}]')
         assert _extract_clips_from_chunk(self._chunk(), {}) == []
 
-    @patch("pipeline.analyzer.requests.post")
+    @patch("pipeline.llm_client.requests.post")
     def test_api_error_returns_empty(self, mock_post):
         import requests as _rq
         mock_post.side_effect = _rq.exceptions.ConnectionError("down")
         assert _extract_clips_from_chunk(self._chunk(), {}) == []
 
-    @patch("pipeline.analyzer.requests.post")
+    @patch("pipeline.llm_client.requests.post")
     def test_empty_response_returns_empty(self, mock_post):
         mock_post.return_value = _llm_response('')
         assert _extract_clips_from_chunk(self._chunk(), {}) == []
@@ -99,3 +100,40 @@ class TestDeduplicate:
 
     def test_empty(self):
         assert _deduplicate_clips([], overlap_threshold_seconds=5.0) == []
+
+
+def _sents(n, per=5.0):
+    return {i: {"start_time": i * per, "end_time": (i + 1) * per,
+                "text": f"sentence {i}."} for i in range(n)}
+
+
+class TestSplitIdsByTime:
+    def test_splits_at_target(self):
+        groups = _split_ids_by_time(list(range(40)), _sents(40),
+                                    target_span=55.0, max_span=90.0,
+                                    min_span=15.0)
+        assert len(groups) >= 2
+        for g in groups:
+            span = (max(_sents(40)[i]["end_time"] for i in g)
+                    - min(_sents(40)[i]["start_time"] for i in g))
+            assert span >= 15.0
+
+    def test_short_tail_merges(self):
+        # 12 x 5s = 60s total, target 55 -> one group (tail merges)
+        groups = _split_ids_by_time(list(range(12)), _sents(12),
+                                    target_span=55.0)
+        assert len(groups) == 1 and len(groups[0]) == 12
+
+    def test_tiny_section_dropped(self):
+        groups = _split_ids_by_time([0, 1], _sents(2), min_span=15.0)
+        assert groups == []
+
+    def test_dead_key_4xx_skips_chunk(self):
+        import requests
+        from unittest.mock import patch
+        err = requests.exceptions.HTTPError("403 Client Error")
+        err.response = type("R", (), {"status_code": 403})()
+        with patch("pipeline.analyzer.requests.post", side_effect=err):
+            assert _extract_clips_from_chunk(
+                {"chunk_index": 0, "start_time": 0.0, "end_time": 60.0,
+                 "text": "x"}, {}) == []

@@ -22,6 +22,45 @@ def _ffmpeg_location_args() -> list:
         return ['--ffmpeg-location', loc]
     return []  # ffmpeg on PATH — yt-dlp finds it itself
 
+# Minimum accepted source height. Below this a 9:16 crop holds too few real
+# pixels (360p -> 202x360 upscaled 5.3x = blur), so the download fails loudly
+# instead of producing blurry clips. Override via YT_MIN_HEIGHT env var.
+MIN_SOURCE_HEIGHT = int(os.getenv("YT_MIN_HEIGHT", "720"))
+
+# HD-first format ladder: 720p+ mp4 preferred, any 720p+ next, plain best
+# only as a last resort (still gated by the resolution probe below).
+HQ_FORMAT = ('bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/'
+             'bestvideo[height>=720]+bestaudio/'
+             'best[height>=720]/best')
+
+
+def _js_runtime_args() -> list:
+    """['--js-runtimes', name] for the first available runtime.
+
+    yt-dlp needs a JS runtime to unlock HD YouTube formats; without one the
+    HQ attempt fails and everything degrades to 360p.
+    """
+    for name in ("deno", "node"):
+        if shutil.which(name):
+            return ["--js-runtimes", name]
+    log.warning("no JS runtime (deno/node) on PATH — yt-dlp HD formats "
+                "may be unavailable, SD fallback likely")
+    return []
+
+
+def _probe_height(path: str) -> int:
+    """Video stream height via ffprobe, or 0 when unreadable."""
+    try:
+        from config import ffprobe_path
+        r = subprocess.run(
+            [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of",
+             "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=60)
+        return int((r.stdout or "").strip() or 0)
+    except Exception:
+        return 0
+
 def detect_source_type(input_string: str) -> str:
     if "youtube.com" in input_string or "youtu.be" in input_string:
         st = "youtube_live" if "live" in input_string else "youtube"
@@ -54,46 +93,72 @@ def _run_yt_dlp(cmd: list, label: str):
 def _handle_youtube(url: str):
     """Handles standard YouTube video downloads using yt-dlp.
 
-    Tries full-quality (default client) first, falls back to the Android
-    player client (usually 360p) when the CDN blocks default-client URLs
-    with HTTP 403.
+    Client ladder (first probe pass wins):
+      1. youtube-hq — default client + JS runtime, HD-first format ladder.
+      2. android fallback — recovers when the CDN 403s default-client URLs
+         (often caps at 360p).
+    After each attempt the file is probed: anything below MIN_SOURCE_HEIGHT
+    is rejected and the next client is tried. If no client reaches HD the
+    download FAILS LOUDLY — a 360p source would upscale ~5x into blur,
+    so silent SD is worse than an explicit error.
     """
-    log.info("youtube download start url=%.100s", url)
+    log.info("youtube download start url=%.100s (min %dp)", url, MIN_SOURCE_HEIGHT)
     t0 = time.monotonic()
     OUTPUT_PATH = "input/raw_video.mp4"
-    cmd = [
-        *_ytdlp(),
-        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4',
-        '--merge-output-format', 'mp4',
-        *_ffmpeg_location_args(),
-        '--retries', '3',
-        '-o', OUTPUT_PATH,
-        url
-    ]
-    try:
-        _run_yt_dlp(cmd, "youtube-hq")
-    except subprocess.CalledProcessError as e1:
-        log.warning("youtube-hq failed, retrying via android client (360p)")
-        fallback = [
+    js = _js_runtime_args()
+    attempts = [
+        ("youtube-hq", [
             *_ytdlp(),
-            '--extractor-args', 'youtube:player_client=android',
-            '-f', 'best',
+            '-f', HQ_FORMAT,
             '--merge-output-format', 'mp4',
+            *js,
             *_ffmpeg_location_args(),
             '--retries', '3',
             '-o', OUTPUT_PATH,
             url
-        ]
+        ]),
+        ("youtube-android-fallback", [
+            *_ytdlp(),
+            '--extractor-args', 'youtube:player_client=android',
+            '-f', 'best',
+            '--merge-output-format', 'mp4',
+            *js,
+            *_ffmpeg_location_args(),
+            '--retries', '3',
+            '-o', OUTPUT_PATH,
+            url
+        ]),
+    ]
+    last_error = None
+    for label, cmd in attempts:
+        # drop a stale SD file so the probe below always checks this attempt
         try:
-            _run_yt_dlp(fallback, "youtube-android-fallback")
-        except subprocess.CalledProcessError:
-            log.exception("youtube download failed (both clients) url=%.100s", url)
-            raise e1
-    # Safety fallback: rename .webm to .mp4 if format negotiation failed
-    webm_path = OUTPUT_PATH + ".webm"
-    if not os.path.exists(OUTPUT_PATH) and os.path.exists(webm_path):
-        shutil.move(webm_path, OUTPUT_PATH)
-        log.info("renamed webm output to %s", OUTPUT_PATH)
+            if os.path.exists(OUTPUT_PATH):
+                os.remove(OUTPUT_PATH)
+        except OSError:
+            pass
+        try:
+            _run_yt_dlp(cmd, label)
+        except subprocess.CalledProcessError as e:
+            log.warning("%s failed, trying next client", label)
+            last_error = e
+            continue
+        height = _probe_height(OUTPUT_PATH)
+        log.info("%s done height=%dp", label, height)
+        if height >= MIN_SOURCE_HEIGHT:
+            break
+        log.warning("%s only reached %dp (< %dp), trying next client",
+                    label, height, MIN_SOURCE_HEIGHT)
+        last_error = RuntimeError(f"{label} produced {height}p")
+    else:
+        # loop exhausted without break — no HD source obtained
+        log.error("youtube download failed to reach %dp url=%.100s",
+                  MIN_SOURCE_HEIGHT, url)
+        raise RuntimeError(
+            f"YouTube download never reached {MIN_SOURCE_HEIGHT}p — "
+            f"refusing SD source (a 9:16 crop of SD upscales ~5x into blur). "
+            f"Install deno/node for HD formats or pick another video.") \
+            from last_error
     size = os.path.getsize(OUTPUT_PATH) if os.path.exists(OUTPUT_PATH) else -1
     log.info("youtube download done bytes=%d elapsed=%.1fs path=%s", size, time.monotonic() - t0, OUTPUT_PATH)
 
@@ -108,6 +173,7 @@ def _handle_youtube_live(url: str):
         '--merge-output-format', 'mp4',
         '--downloader', 'ffmpeg',
         '--downloader-args', 'ffmpeg_i:-t 300',
+        *_js_runtime_args(),
         *_ffmpeg_location_args(),
         '-o', OUTPUT_PATH,
         url

@@ -141,23 +141,23 @@ Return ONLY valid JSON array, no explanation:
     response = None
     for attempt in range(max_retries):
         try:
-            response = requests.post(
-                LLM_API_URL,
-                headers={
-                    "Authorization": f"Bearer {LLM_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
+            from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
+            response = post_chat(
+                {
                     "model": LLM_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 2000,
                     "temperature": 0.3
                 },
-                timeout=120
-            )
-            response.raise_for_status()
+                timeout=120, slot=SLOT_FOR_STAGE["analyzer"],
+                purpose="analyzer")
             break  # Success
         except requests.exceptions.RequestException as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and resp.status_code in (400, 401, 403, 404):
+                log.error("analyzer API %s (key/model dead), skipping chunk",
+                          resp.status_code)
+                return []
             log.warning("analyzer API failed attempt %d/%d: %s", attempt + 1, max_retries, e)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)  # Exponential backoff
@@ -235,6 +235,7 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
         words, sentences = [], []
 
     clips = []
+    outline = None
     if words and sentences:
         tsig = transcript_signature("transcripts/transcript.json")
         # Pass 1: reuse cached outline when the fingerprint matches
@@ -287,6 +288,25 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
     if not clips and d_cfg.get("legacy_fallback", True):
         log.info("analyze falling back to legacy per-chunk extraction")
         clips = _analyze_legacy(video_id, chunks, config)
+    if not clips:
+        log.warning("analyze: LLM unreachable, deterministic section fallback")
+        clips = _deterministic_section_clips(
+            video_id, outline, words, sentences, chunks, target,
+            campaign_text=campaign_text, cfg=cfg)
+    elif len(clips) < target and (outline or {}).get("method") != "llm":
+        # LLM was unreachable (non-llm outline) and two-pass fell short:
+        # top up with guaranteed section spans so the run still yields a
+        # useful set. Existing clips win overlaps (excluded below).
+        log.warning("analyze: topping up %d -> %d with deterministic spans",
+                    len(clips), target)
+        extra = _deterministic_section_clips(
+            video_id, outline, words, sentences, chunks,
+            target - len(clips),
+            campaign_text=campaign_text, cfg=cfg,
+            exclude_ranges=[(c["start_time"], c["end_time"]) for c in clips
+                            if c.get("start_time") is not None],
+            start_clip_number=len(clips) + 1)
+        clips.extend(extra)
     _write_clips_analysis_json(clips)
     return clips
 
@@ -311,6 +331,143 @@ def _fusion_pool(video_id, outline_candidates):
     log.info("fusion pool outline=%d total=%d",
              len(outline_candidates or []), len(pool))
     return pool
+
+
+def _split_ids_by_time(sids, sentences_by_id, target_span=55.0,
+                       max_span=90.0, min_span=15.0):
+    """Greedy sentence-ID groups bounded by time. Pure function (testable).
+
+    Accumulates until target_span (or max_span / 120-sentence cap), merges a
+    short tail into the previous group when it fits, drops spans below
+    min_span. Returns a list of ID lists.
+    """
+    def _span(ids):
+        return (max(sentences_by_id[i]["end_time"] for i in ids)
+                - min(sentences_by_id[i]["start_time"] for i in ids))
+
+    groups, cur = [], []
+    for sid in sids:
+        if sid not in sentences_by_id:
+            continue
+        cur.append(sid)
+        if _span(cur) >= target_span or len(cur) >= 120 or _span(cur) >= max_span:
+            groups.append(cur)
+            cur = []
+    if cur:
+        if groups:
+            merged = groups[-1] + cur
+            if _span(merged) <= max_span:
+                groups[-1] = merged
+            elif _span(cur) >= min_span:
+                groups.append(cur)
+            # else: short tail that cannot merge — dropped
+        else:
+            groups.append(cur)
+    return [g for g in groups if _span(g) >= min_span]
+
+
+def _deterministic_section_clips(video_id, outline, words, sentences, chunks,
+                                 target, campaign_text="", cfg=None,
+                                 exclude_ranges=None, start_clip_number=1):
+    """Last-resort picker when the LLM is unreachable (dead key / offline).
+
+    One candidate per outline-section sub-span (hook = opening words, idea =
+    section title/summary). Scored + inserted through the normal fusion path
+    (local embeddings only — no LLM). Spans overlapping exclude_ranges
+    (IoU > 0.5) are skipped so existing clips win. Clip numbering starts at
+    start_clip_number. Returns inserted clips (may be fewer than target).
+    """
+    from pipeline.discovery import persist_candidates
+    if not outline or not sentences:
+        return []
+    cfg = cfg or {}
+    d_cfg = cfg.get("discovery", {})
+    min_span = float(d_cfg.get("min_span_seconds", 15) or 0)
+    max_span = float(d_cfg.get("max_span_seconds", 90) or 0)
+    max_cand = int(d_cfg.get("max_candidates", 24) or 24)
+    by_id = {s["id"]: s for s in sentences}
+    excluded = [(float(a), float(b)) for a, b in (exclude_ranges or [])]
+
+    def _excluded(rng):
+        a, b = rng
+        for x, y in excluded:
+            inter = max(0.0, min(b, y) - max(a, x))
+            union = (b - a) + (y - x) - inter
+            if union > 0 and inter / union > 0.5:
+                return True
+        return False
+
+    cands = []
+    for sec in (outline.get("sections") or []):
+        try:
+            lo, hi = int(sec.get("start_id", 0)), int(sec.get("end_id", -1))
+        except (TypeError, ValueError):
+            continue
+        sids = [i for i in range(lo, hi + 1) if i in by_id]
+        for grp in _split_ids_by_time(sids, by_id, max_span=max_span or 90.0,
+                                      min_span=min_span or 0):
+            rng = (min(by_id[i]["start_time"] for i in grp),
+                   max(by_id[i]["end_time"] for i in grp))
+            if _excluded(rng):
+                continue
+            text = " ".join(by_id[i]["text"] for i in grp)
+            cands.append({
+                "sentence_ids": grp,
+                "source_ranges": [[round(rng[0], 3), round(rng[1], 3)]],
+                "hook": " ".join(text.split()[:12])[:300],
+                "main_idea": str(sec.get("title", "")
+                                 or sec.get("summary", ""))[:600],
+                "payoff": "",
+                "required_context": "",
+                "rationale": ("deterministic section span "
+                              "(LLM unreachable; unvalidated)"),
+                "uncertainty": 0.7,
+                "joins": [],
+                "source": "outline_deterministic",
+                "provenance": {"section": str(sec.get("title", ""))[:120]},
+            })
+            if len(cands) >= max_cand:
+                break
+        if len(cands) >= max_cand:
+            break
+    if not cands:
+        return []
+    ids = persist_candidates(video_id, cands, source="outline_deterministic")
+    for c, i in zip(cands, ids):
+        c["db_id"] = i
+    pool = list(cands) + [r for r in _fusion_pool(video_id, [])
+                          if r.get("source") == "audio_event"
+                          and r.get("id") not in {c.get("db_id") for c in cands}]
+    log.info("deterministic fallback candidates=%d pool=%d",
+             len(cands), len(pool))
+    inserted = _insert_clips_from_candidates(video_id, pool, chunks, target,
+                                             campaign_text=campaign_text, cfg=cfg)
+    # renumber when topping up an existing set
+    if start_clip_number != 1:
+        _renumber_clips(inserted, start_clip_number)
+    return inserted
+
+
+def _renumber_clips(clips, start):
+    """Shift clip_number (DB + in-memory) to follow an existing set."""
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            for i, c in enumerate(clips):
+                cur.execute("UPDATE clips SET clip_number=%s WHERE id=%s",
+                            (start + i, c["id"]))
+            conn.commit()
+    except Exception:
+        log.exception("clip renumber failed")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        release_conn(conn)
+    for i, c in enumerate(clips):
+        c["clip_number"] = start + i
 
 
 def _insert_clips_from_candidates(video_id, candidates, chunks, target,

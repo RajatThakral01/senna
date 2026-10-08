@@ -63,5 +63,43 @@ class TestInputHandler(unittest.TestCase):
             input_handler.handle_input("this is not a valid source")
         print("✅ Unknown source correctly raises ValueError.")
 
+    def test_js_runtime_args_shape(self):
+        args = input_handler._js_runtime_args()
+        self.assertIsInstance(args, list)
+        if args:
+            self.assertEqual(args[0], "--js-runtimes")
+            self.assertIn(args[1], ("deno", "node"))
+
+    def test_sd_source_refused(self):
+        print("Testing SD refusal...")
+        import subprocess
+        from unittest.mock import call
+        with patch("input.input_handler._run_yt_dlp") as mock_run, \
+             patch("input.input_handler._probe_height", return_value=360), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.remove"), \
+             patch("os.path.getsize", return_value=1):
+            with self.assertRaises(RuntimeError):
+                input_handler._handle_youtube("https://www.youtube.com/watch?v=123")
+            # both clients attempted
+            self.assertEqual(mock_run.call_count, 2)
+        print("✅ SD source fails loudly after both clients.")
+
+    def test_hd_source_accepted_first_try(self):
+        print("Testing HD accept...")
+        with patch("input.input_handler._run_yt_dlp") as mock_run, \
+             patch("input.input_handler._probe_height", return_value=1080), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.remove"), \
+             patch("os.path.getsize", return_value=1):
+            input_handler._handle_youtube("https://www.youtube.com/watch?v=123")
+            self.assertEqual(mock_run.call_count, 1)
+            cmd = mock_run.call_args[0][0]
+            flat = " ".join(cmd)
+            self.assertIn("--js-runtimes", flat)
+            self.assertIn("height>=720", flat)
+        print("✅ HD source accepted, JS runtime passed.")
+
+
 if __name__ == '__main__':
     unittest.main()
