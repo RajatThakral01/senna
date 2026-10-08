@@ -89,7 +89,8 @@ flowchart TD
    sudo apt install -y postgresql-16 postgresql-16-pgvector
    sudo systemctl start postgresql
    ```
-4. **Groq API key** (LLM only — embeddings are local): free at [console.groq.com/keys](https://console.groq.com/keys).
+4. **Groq API keys** (LLM only — embeddings are local): free at [console.groq.com/keys](https://console.groq.com/keys). Fill all four slots (`GROQ_API_KEY`, `_2`, `_3`, `_FALLBACK`); the pipeline routes stages across keys and falls back automatically.
+5. **Node.js or Deno** (for HD YouTube downloads — yt-dlp needs a JS runtime to unlock ≥720p formats; without one the pipeline refuses SD sources instead of producing blurry clips).
 5. **Local embedding model**: `models/Qwen3-Embedding-0.6B` (or set `EMBED_MODEL` to a local dir / HuggingFace id; dim must match `vector(1024)` or `EMBED_DIM`).
 
 ---
@@ -138,7 +139,12 @@ cp .env.example .env
 
 ```env
 # Groq LLM (embeddings are local — no key needed)
-GROQ_API_KEY=your_groq_api_key_here
+# Slots: key1 = outline/discovery, key2 = similarity, key3 = campaign/analyzer,
+# key4 = automatic fallback. Empty slots are skipped.
+GROQ_API_KEY=your_groq_api_key_1_here
+GROQ_API_KEY_2=your_groq_api_key_2_here
+GROQ_API_KEY_3=your_groq_api_key_3_here
+GROQ_API_KEY_FALLBACK=your_groq_api_key_4_here
 GROQ_MODEL=openai/gpt-oss-120b
 
 # Local embeddings (must match DB vector dim)
@@ -237,7 +243,7 @@ export: {consolidated: true}   # false = legacy multi-pass chain
 
 ## 🧪 Tests
 
-208/208 green (`pytest`; unit tests are fully mocked — no API/DB/FFmpeg needed). `validate_fullscreen.py` checks real renders (dims, audio, duration, static-fill scan, crop-debug previews).
+220/220 green (`pytest`; unit tests are fully mocked — no API/DB/FFmpeg needed). `validate_fullscreen.py` checks real renders (dims, audio, duration, static-fill scan, crop-debug previews).
 
 ---
 

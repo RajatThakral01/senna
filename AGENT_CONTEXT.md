@@ -1,11 +1,13 @@
 # 🤖 Agent Implementation Context: Viral Clips Automator (Detailed Architecture)
 
-**Version:** 4.0
-**Date:** 06 Oct 2026
-**Status:** 11-stage pipeline implemented & verified end-to-end; 183/183 tests green
+**Version:** 4.1
+**Date:** 08 Oct 2026
+**Status:** 11-stage pipeline implemented & verified end-to-end; 220/220 tests green
 **Purpose:** This document is the single source of truth for the AI agent maintaining this project. It provides exhaustive technical details of how the Viral Clips Automator works under the hood so that the agent understands the entire system.
 
 > v4.0 changelog vs v3.2: full rewrite to match reality. Provider is now **Groq LLM (`openai/gpt-oss-120b`) + local SentenceTransformer embeddings (`models/Qwen3-Embedding-0.6B`, 1024-dim)** — all NVIDIA NIM / Kimi / MiniMax references removed from live code. Pipeline is **11 stages** (was 8): added `audio_events`, `outline`, `refine` stages; `analyze` is now two-pass contextual discovery (outline → candidates → fusion). New modules: `boundaries.py`, `framing.py`, `outline.py`, `discovery.py`, `fingerprints.py`, `audio_events.py`, `audio_classifier.py`, `fusion.py`, `captions.py`, `glossary.py`, `editplan.py`, `polish.py`, `review.py`, `speakers.py`, `visual.py`, `diarization.py`. DB migrations v4–v6 applied (refine columns, outlines/candidates/audio_events/fingerprints/provenance, edit_plans). Render path is now framing + ASS captions + consolidated single-pass polish with versioned edit plans, plus a Review & Correct UI tab. `resume.py`, `pipeline/downloader.py`, `subtitler.py`, `karaoke_burn.py` no longer exist — use `rerun_from_embed.py`. Test suite repaired: 183/183 pass.
+
+> v4.1 changelog vs v4.0: 4-key LLM rotation (`pipeline/llm_client.py`, usage slots + key4 fallback; `.env`/`config.py` pool, placeholder-aware), HD-enforced YouTube download (JS runtime, `height>=720` ladder, ffprobe gate, loud SD refusal), deterministic offline top-up (`_deterministic_section_clips`, `topup_clips.py`), fusion `None`-hook hardening, 4xx fast-fail everywhere, framing truncation guard (fail loudly → static-crop fallback), `validate_fullscreen.py` render checks + crop-debug previews, `center_crop` layout + manual ROI overrides. Suite now 220/220.
 
 ---
 
@@ -29,6 +31,8 @@ viral_clips_automator/
 ├── preview_framing.py             # Verification only: layout previews + boundary demo → output/previews/
 ├── demo_faces.py                  # Verification only: synthetic face demos (public-domain portrait)
 ├── bench_transcribe.py            # Verification only: WhisperX model benchmark → output/bench_transcription.json
+├── topup_clips.py                 # Surgical resume: deterministic top-up + similarity/refine/render
+├── validate_fullscreen.py         # Render checks (dims/audio/duration/fill scan) + crop-debug previews
 ├── config.yaml                    # SOURCE OF TRUTH for all tunables (see §4)
 ├── config.py                      # Groq + local-embedding settings, get_config(), ffmpeg/ffprobe resolvers
 ├── requirements.txt               # yt-dlp, whisperx, gradio, psycopg2, pgvector, sentence-transformers, opencv, mediapipe, pytest
@@ -39,7 +43,7 @@ viral_clips_automator/
 │
 ├── input/
 │   ├── __init__.py
-│   └── input_handler.py           # LIVE: normalizes any source into input/raw_video.mp4
+│   ├── input_handler.py           # LIVE: any source → input/raw_video.mp4 (HD-enforced, ≥720p or loud fail)
 │
 ├── campaign/
 │   ├── __init__.py
@@ -72,7 +76,8 @@ viral_clips_automator/
 │   ├── boundaries.py              # LIVE: sentence-complete refinement (deterministic + LLM-validated)
 │   ├── fingerprints.py            # Stage fingerprints for checkpoint invalidation
 │   ├── clipper.py                 # LIVE: FFmpeg cut / concat stitch (respects stitch caps)
-│   ├── framing.py                 # LIVE: face-aware 9:16 (auto/speaker_crop/stacked_split/branded_fit)
+│   ├── framing.py                 # LIVE: full-screen 9:16 crops (auto/speaker_crop/stacked_split/center_crop; branded_fit manual-only, flag-off)
+│   ├── llm_client.py              # LIVE: Groq slot routing (key1 heavy/key2 match/key3 light/key4 fallback)
 │   ├── diarization.py             # OPTIONAL: pyannote wrapper (needs HF_TOKEN; never maps audio→face alone)
 │   ├── speakers.py                # OPTIONAL (off): explicit-map-only speaker-switch adapter
 │   ├── visual.py                  # OPTIONAL (off): keyframe sampler + vision-backend adapter (never fakes)
@@ -90,7 +95,7 @@ viral_clips_automator/
 │   ├── music/                     # empty by default
 │   └── style.css                  # unused
 │
-├── test_*.py                      # pytest suite, 183/183 green (see §8)
+├── test_*.py                      # pytest suite, 220/220 green (see §8)
 ├── transcripts/                   # transcript.json/txt, clips_analysis.json, outline.json, visual.json, glossary.json (generated)
 ├── clips/                         # intermediates: clip_N.mp4 → _vertical → .srt → _plan.json (generated)
 ├── downloads/                     # audio.wav for WhisperX (generated)
@@ -195,7 +200,11 @@ fades: {video: true, audio: false, duration: 0.5}
 
 ### config.py (named constants)
 ```python
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY", ...)      # LLM only; "" when unset (mock/fallback paths)
+GROQ_API_KEY          = os.getenv("GROQ_API_KEY", ...)   # slot 1: outline/discovery/enrich
+GROQ_API_KEY_2        = os.getenv("GROQ_API_KEY_2", "")  # slot 2: similarity
+GROQ_API_KEY_3        = os.getenv("GROQ_API_KEY_3", "")  # slot 3: campaign/analyzer/boundaries
+GROQ_API_KEY_FALLBACK = os.getenv("GROQ_API_KEY_FALLBACK", ...)  # slot 4: fallback
+# pool_usable() treats empties + known placeholders as missing (mock/fallback paths)
 GROQ_BASE_URL  = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_LLM_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 LLM_API_KEY, LLM_MODEL, LLM_API_URL  # provider-agnostic aliases used by all LLM modules
@@ -254,7 +263,7 @@ Cosine similarity = `1 - (embedding <=> query)` (`chunk_repo.find_similar_chunks
 
 ## 8. TEST SUITE STATUS (accurate as of v4.0)
 
-**208/208 pytest pass** (was 33 with 7 failures + 2 collection errors). Phase 0 repaired 5 stale files (wrong import paths, teardown deleting real assets, obsolete APIs). `unittest.mock` throughout — no real API/DB/FFmpeg in unit tests. `test_editplan_polish.TestProbe` uses a synthetic lavfi file (never the live `input/`).
+**220/220 pytest pass** (was 33 with 7 failures + 2 collection errors). Phase 0 repaired 5 stale files (wrong import paths, teardown deleting real assets, obsolete APIs). `unittest.mock` throughout — no real API/DB/FFmpeg in unit tests. `test_editplan_polish.TestProbe` uses a synthetic lavfi file (never the live `input/`). `test_llm_client.py` covers slot order, 429/dead-key rotation, placeholder exclusion, empty-pool error.
 
 - `test_boundaries` + `test_framing`: 24/24 (mid-sentence end, unfinished thought, missing punctuation/timestamps, end-of-video bound, duration conflict, stitched SRT sync, 1/2-face, camera cut, detection loss, crop bounds, stability, diarization-no-map).
 - Fusion/captions/editplan+polish/speakers+visual/audio-events/outline+discovery/review/glossary suites: all green.

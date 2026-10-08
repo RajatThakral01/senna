@@ -35,8 +35,13 @@
 ## Phase 7 — Adapters (optional, off) ✅
 - `pipeline/speakers.py` (explicit-map only; auto-match reports unevaluated; turn stability + overlap/hold rules) + `pipeline/visual.py` (keyframe sampling verified live; backends report disabled/unavailable, never fake). Both default off, 15 tests green.
 
+## Phase 8 — Scale & hardening ✅
+- `pipeline/llm_client.py`: 4-key rotation (slots by measured usage: key1 outline/discovery/enrich, key2 similarity, key3 campaign/analyzer/boundaries, key4 fallback; values never logged; placeholders excluded). All 7 LLM call sites rewired; 4xx fast-fail everywhere; pool-aware guards. Verified live: 429s absorbed mid-run via rotation.
+- Deterministic offline path: `_deterministic_section_clips` top-up + `topup_clips.py` resume; fusion `None`-hook hardening. Verified live on a 58-min video with a dead (403) key: 15 top-up + 3 audio clips.
+- `input/input_handler.py`: HD enforcement (`--js-runtimes node/deno`, `height>=720` ladder, ffprobe gate, loud SD refusal after 360p incident). `validate_fullscreen.py` render checks + `render_crop_debug`. Framing truncation guard. Suite 220/220.
+
 ## Final verification state ✅
-- **183/183 pytest pass.** Three full e2e runs on the 324s sample (final: 3 clips, render 406s). Migrations v4–v6 applied with graceful fallbacks.
+- **220/220 pytest pass.** Three full e2e runs on the 324s sample (final: 3 clips, render 406s) + one full 58-min run (25 clips, 23 finals, all validated full-screen vertical). Migrations v4–v6 applied with graceful fallbacks.
 - Benchmark (same source): baseline 4 clips/25–65s, word-captions, blur default → final 3 clips/35–50s, fusion 0.53–0.81, 1 near-dup rejected, 2 audio cues fused, 18–31 phrase cues, plans v1, single-pass polish. Target 8 is a maximum — floor + dedup explain fewer, by design.
 - Evidence kept: `output/` finals, `output/phase0|phase1|phase4_monster` snapshots, `output/previews/`, `output/bench_transcription.json`, `preview_framing.py`, `demo_faces.py`.
 - Also fixed live along the way: MediaPipe `mp.Image` move (detector silently finding nothing), campaign 429 crash, 283s spans, 120s stitch, ASS path/config bugs.

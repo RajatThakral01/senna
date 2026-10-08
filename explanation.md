@@ -95,7 +95,7 @@ Each stage is **checkpointed in the database** (`pipeline_runs` table + fingerpr
 
 Two kinds of “AI” are used:
 1. **Local AI:** WhisperX (speech→text) and Qwen3 embeddings (text→numbers) run on your machine. No internet needed after model download, no embedding bills.
-2. **Cloud AI (Groq):** `openai/gpt-oss-120b` for understanding text — campaign parsing, finding clip candidates, checking boundaries, classifying continuations. Needs `GROQ_API_KEY`.
+2. **Cloud AI (Groq):** `openai/gpt-oss-120b` for understanding text — campaign parsing, finding clip candidates, checking boundaries, classifying continuations. Needs `GROQ_API_KEY` (+ `_2`, `_3`, `_FALLBACK` — stages are split across keys with automatic fallback).
 
 One database (PostgreSQL) glues everything together. One video tool (FFmpeg, plus OpenCV/MediaPipe for faces) does all video work.
 
@@ -114,7 +114,7 @@ One database (PostgreSQL) glues everything together. One video tool (FFmpeg, plu
 | Video editing | **FFmpeg/FFprobe** (`libx264`, `fast`, `crf 23`, `aac`), **OpenCV**, **MediaPipe** | Cut, face-track, 1080×1920, ASS subtitles, logo, ducked music, fades |
 | Config | **YAML** (`config.yaml`) + `python-dotenv` + `config.py` | All tunables in one place, secrets in `.env` |
 | Web UI | **Gradio** (`ui.py`, port 7862) | Generate + Review & Correct tabs |
-| Tests | **pytest** (183/183 green, mocked) | Fast unit tests without API/DB/FFmpeg |
+| Tests | **pytest** (220/220 green, mocked) | Fast unit tests without API/DB/FFmpeg |
 
 ---
 
@@ -262,7 +262,7 @@ Groq free-tier bursts can 429 on long videos — the pipeline retries, then degr
 
 ## 10. Tests & Evidence
 
-- `pytest` → **183/183 green** (mocked unit tests, no API/DB/FFmpeg needed).
+- `pytest` → **220/220 green** (mocked unit tests, no API/DB/FFmpeg needed).
 - Real runs need DB + media: three full end-to-end runs on a 324s sample via `rerun_from_embed.py`; snapshots in `output/phase0|phase1|phase4_monster`, layout previews in `output/previews/`, transcription benchmark in `output/bench_transcription.json`.
 - Not yet exercised on real footage (honest gaps): 2-person stacked layout, speaker switching + diarization, YAMNet labels, large WhisperX models, selective re-render. And nobody has eyeballed a preview here yet — machine checks (dims/duration/audio/timing) all pass, please watch one.
 
@@ -272,12 +272,12 @@ Groq free-tier bursts can 429 on long videos — the pipeline retries, then degr
 
 ```bash
 pip install -r requirements.txt
-# needs: postgres + vector extension, ffmpeg, .env with GROQ_API_KEY
+# needs: postgres + vector extension, ffmpeg, node/deno (HD YouTube), .env with GROQ_API_KEYs
 
 python main.py "https://youtu.be/XXXX" --campaign "podcast style, add logo" --template podcast_clip --layout auto
 python ui.py                                   # → http://localhost:7862
 python rerun_from_embed.py <video_id>          # re-run embed→render dup-safe
-pytest                                         # 183 unit tests
+pytest                                         # 220 unit tests
 ```
 
 Change clip style: templates or `--campaign` English. Change look: `captions.*` / `framing.*` in `config.yaml`. Change pickiness: `fusion.min_score` / `discovery.target_clips`.
@@ -286,6 +286,6 @@ Change clip style: templates or `--campaign` English. Change look: `captions.*` 
 
 ## 12. Security Notes
 
-- Never commit `.env`. No secrets are hardcoded — empty `GROQ_API_KEY` simply enables mock/fallback paths.
+- Never commit `.env`. No secrets are hardcoded — empty key slots are skipped (mock/fallback paths when none usable).
 - `DB_PASSWORD` empty by default (local trust auth); set it on shared machines.
 - Old hardcoded demo paths in `regen_srt.py` / `fast_burn.py` `main()` blocks only matter for direct script runs.
