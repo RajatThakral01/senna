@@ -8,6 +8,38 @@ from config import WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_DEVICE, WHISPER_COMP
 
 log = get_logger("pipeline.transcriber")
 
+# Optional model cache for batch work (campaign edit mode transcribes many
+# short videos; loading Whisper costs ~7 s each time). Off by default so the
+# long-video pipeline still frees memory right after transcription.
+_MODEL_CACHE = {}
+
+
+def _load_model(model, device, compute, keep):
+    key = ("asr", model, device, compute)
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key]
+    m = whisperx.load_model(model, device=device, compute_type=compute)
+    if keep:
+        _MODEL_CACHE[key] = m
+    return m
+
+
+def _load_align(language, device, keep):
+    key = ("align", language, device)
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key]
+    pair = whisperx.load_align_model(language_code=language, device=device)
+    if keep:
+        _MODEL_CACHE[key] = pair
+    return pair
+
+
+def release_models():
+    """Drop cached Whisper/align models (call after a batch)."""
+    _MODEL_CACHE.clear()
+    import gc
+    gc.collect()
+
 def _transcription_settings():
     """Model/device/compute/language from config.yaml [transcription] + env.
 
@@ -23,16 +55,21 @@ def _transcription_settings():
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 device = "cpu"
+        compute = t.get("compute_type") or WHISPER_COMPUTE
+        if str(compute).lower() == "auto":
+            # int8 on CPU (~1.2x faster than float32, same words in our
+            # benchmark); float16 on CUDA
+            compute = "float16" if device == "cuda" else "int8"
         return (t.get("model") or WHISPER_MODEL,
                 t.get("language") or WHISPER_LANGUAGE,
                 device,
-                t.get("compute_type") or WHISPER_COMPUTE,
+                compute,
                 t.get("glossary") or [])
     except Exception:
         return WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_DEVICE, WHISPER_COMPUTE, []
 
 
-def transcribe_audio(audio_path, output_dir="transcripts"):
+def transcribe_audio(audio_path, output_dir="transcripts", keep_models=False):
     """
     Transcribes audio using WhisperX with word-level timestamps.
     Returns path to transcript JSON file.
@@ -48,11 +85,7 @@ def transcribe_audio(audio_path, output_dir="transcripts"):
     with log_stage("pipeline.transcriber", "load_model"):
         log.info("loading WhisperX model=%s device=%s", MODEL, DEVICE)
         # Load WhisperX model
-        model = whisperx.load_model(
-            MODEL,
-            device=DEVICE,
-            compute_type=COMPUTE
-        )
+        model = _load_model(MODEL, DEVICE, COMPUTE, keep_models)
 
     with log_stage("pipeline.transcriber", "transcribe"):
         log.info("transcribing audio (may take minutes) path=%s", audio_path)
@@ -69,10 +102,7 @@ def transcribe_audio(audio_path, output_dir="transcripts"):
     # Align for word-level timestamps
     with log_stage("pipeline.transcriber", "align"):
         log.info("aligning word-level timestamps...")
-        model_a, metadata = whisperx.load_align_model(
-            language_code=result["language"],
-            device=DEVICE
-        )
+        model_a, metadata = _load_align(result["language"], DEVICE, keep_models)
         result = whisperx.align(
             result["segments"],
             model_a,

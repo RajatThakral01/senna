@@ -9,7 +9,7 @@ Steps:
   2. render_clips(video_id, clip_numbers=[...]) through the live main.py path.
   3. Per final: dims == 1080x1920, duration sane, audio present, edge bands
      are real content (not uniform fill), layout != branded_fit.
-  4. Debug crop previews (crop rect on source) -> output/previews/crop_debug/.
+  4. Debug crop previews (crop rect on source) -> output/<video>/previews/crop_debug/.
   5. Prints a shot/transition report incl. needs_review flags.
 """
 import json
@@ -86,8 +86,12 @@ def edge_uniformity(path, src_path=None, band=8, samples=8, fade_margin=1.5):
 
 def main():
     from main import render_clips, invalidate_stage
+    import main as _main
+    _main.CONFIG.setdefault("export", {})["keep_intermediates"] = True  # edge checks read the cuts
     from pipeline.framing import render_crop_debug
     video_id = sys.argv[1]
+    from pipeline import workspace
+    ws = workspace.activate(video_id)
     args = [a for a in sys.argv[2:] if not a.startswith("--")]
     numbers = [int(a) for a in args] or [1, 2, 3]
     check_only = "--check-only" in sys.argv
@@ -95,7 +99,7 @@ def main():
     if not check_only:
         invalidate_stage(video_id, "render")
         for n in numbers:
-            for p in (f"output/clip_{n}_final.mp4", f"clips/clip_{n}_vertical.mp4"):
+            for p in (ws.final(n), ws.clip_file(n, "_vertical.mp4")):
                 try:
                     if os.path.exists(p):
                         os.remove(p)
@@ -108,7 +112,7 @@ def main():
     else:
         log.info("check-only on clips=%s (no re-render)", numbers)
 
-    report = json.load(open("output/report.json"))
+    report = json.load(open(ws.report))
     by_no = {c["clip_number"]: c for c in report}
     ok, issues = True, []
     for n in numbers:
@@ -117,12 +121,12 @@ def main():
             print(f"--- clip {n}: SKIPPED (rejected: "
                   f"{(c.get('refine_reason') or '')[:100]}) ---")
             continue
-        final = f"output/clip_{n}_final.mp4"
+        final = ws.final(n)
         info = probe(final)
         v = [s for s in info["streams"] if s["codec_type"] == "video"][0]
         a = [s for s in info["streams"] if s["codec_type"] == "audio"]
         dur = float(info["format"]["duration"])
-        edges = edge_uniformity(final, src_path=f"clips/clip_{n}.mp4")
+        edges = edge_uniformity(final, src_path=ws.clip_file(n))
         flat = [k for k, s in edges.items() if 0 <= s < 0.5]
         checks = {
             "dims_1080x1920": (v["width"], v["height"]) == (OUT_W, OUT_H),
@@ -156,15 +160,16 @@ def main():
             issues.append(f"clip {n}: failed={bad} flat_edges={flat}")
 
         # debug previews: crop rect drawn on source frames
-        os.makedirs("output/previews/crop_debug", exist_ok=True)
+        crop_dir = os.path.join(ws.output_dir, "previews", "crop_debug")
+        os.makedirs(crop_dir, exist_ok=True)
         try:
             from pipeline.framing import sample_clip
-            analysis = sample_clip(f"clips/clip_{n}.mp4",
+            analysis = sample_clip(ws.clip_file(n),
                                    {"sample_interval": 0.5,
                                     "layout_stability_frames": 4})
             paths = render_crop_debug(
-                f"clips/clip_{n}.mp4",
-                f"output/previews/crop_debug/clip_{n}_crop.jpg",
+                ws.clip_file(n),
+                os.path.join(crop_dir, f"clip_{n}_crop.jpg"),
                 analysis=analysis, cfg={"sample_interval": 0.5},
                 manual_rois=[], n=4)
             print(f"    crop_debug: {paths}")

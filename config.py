@@ -132,6 +132,7 @@ def get_config() -> dict:
         "audio":      cfg.get("audio", {}) or {},
         "export":     cfg.get("export", {}) or {},
         "speakers":   cfg.get("speakers", {}) or {},
+        "runtime":    cfg.get("runtime", {}) or {},
         "visual":     cfg.get("visual", {}) or {},
         "transcription": {
             "model": os.getenv("WHISPER_MODEL",

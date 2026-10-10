@@ -85,7 +85,7 @@ def _llm_section_outline(window, window_idx, cfg):
                        "max_tokens": 2000,
                        "messages": [{"role": "user", "content": prompt}]},
                       timeout=120, slot=SLOT_FOR_STAGE["outline"],
-                      purpose="outline")
+                      purpose="outline", json_mode=True)
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()
@@ -151,7 +151,7 @@ def _combine_outlines(section_outlines, cfg):
                        "max_tokens": 800,
                        "messages": [{"role": "user", "content": prompt}]},
                       timeout=120, slot=SLOT_FOR_STAGE["outline"],
-                      purpose="outline-combine")
+                      purpose="outline-combine", json_mode=True)
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()
@@ -238,7 +238,7 @@ def _speaker_turns_for_range(lo, hi, by_id, diarization):
 
 
 def persist_outline(video_id, outline):
-    """Write outline to DB (outlines table) + transcripts/outline.json."""
+    """Write outline to DB (outlines table) + <workspace>/outline.json."""
     from db.repositories import outline_repo
     outline_repo.clear_outlines(video_id)
     for i, sec in enumerate(outline.get("sections", [])):
@@ -251,8 +251,10 @@ def persist_outline(video_id, outline):
                                     content=outline["video"])
     try:
         import os
-        os.makedirs("transcripts", exist_ok=True)
-        with open("transcripts/outline.json", "w", encoding="utf-8") as f:
+        from pipeline.workspace import current
+        out_dir = current().transcripts_dir
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "outline.json"), "w", encoding="utf-8") as f:
             json.dump(outline, f, indent=2, ensure_ascii=False)
     except Exception:
         log.exception("outline.json write failed")

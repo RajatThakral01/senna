@@ -59,3 +59,30 @@ def get_video(video_id: str) -> dict | None:
     finally:
         release_conn(conn)
 
+
+
+def find_latest_by_source(source_url: str) -> dict | None:
+    """Most recent video row for this source (resume target), or None."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id FROM videos WHERE source_url = %s
+                ORDER BY created_at DESC LIMIT 1
+            """, (source_url,))
+            row = cur.fetchone()
+    finally:
+        release_conn(conn)
+    return get_video(str(row[0])) if row else None
+
+
+def update_raw_path(video_id: str, raw_path: str) -> None:
+    """Point a video row at its (possibly re-located) source file."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE videos SET raw_path = %s, updated_at = NOW() WHERE id = %s",
+                        (raw_path, video_id))
+            conn.commit()
+    finally:
+        release_conn(conn)

@@ -59,6 +59,8 @@ coverage.xml
 # but preserve the directories in git via .gitkeep
 clips/*
 !clips/.gitkeep
+work/
+logs/
 downloads/*
 !downloads/.gitkeep
 output/*
@@ -111,3 +113,6 @@ ehthumbs.db
 # --- Logs & Temporary Files ---
 *.log
 *.tmp
+
+# --- Campaign asset libraries (per-campaign uploads, runtime) ---
+assets/campaigns/

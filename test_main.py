@@ -91,6 +91,17 @@ class TestRunPipeline:
         p["start"] = patch("main.run_repo.start_stage")
         p["complete"] = patch("main.run_repo.complete_stage")
         p["dur"] = patch("main.get_video_duration", return_value=100.0)
+        # resume lookup / workspace / per-run log / keep-awake
+        import contextlib
+        from pipeline.workspace import Workspace
+        p["find_prev"] = patch("main.video_repo.find_latest_by_source", return_value=None)
+        p["get_video"] = patch("main.video_repo.get_video",
+                               return_value={"raw_path": "input/raw_video.mp4"})
+        p["ws"] = patch("main.workspace.activate", return_value=Workspace())
+        p["reset"] = patch("main.reset_from_stage")
+        p["run_log"] = patch("main.run_log",
+                             side_effect=lambda *a, **k: contextlib.nullcontext("test.log"))
+        p["awake"] = patch("main._keep_awake", return_value=None)
         return p
 
     def test_run_pipeline_calls_stages(self):
@@ -142,3 +153,56 @@ class TestCLI:
         rp.assert_called_once()
         _, kwargs = rp.call_args
         assert kwargs.get("layout") == "stacked_split"
+
+
+class TestResumeAndWorkspace:
+    def test_workspace_paths_are_per_video(self):
+        from pipeline.workspace import Workspace
+        a = Workspace("c9aa5363-b79c-4837-9c15-5aa64519d6b6", "https://youtu.be/plN7JMbadRg")
+        b = Workspace("11111111-2222-3333-4444-555555555555", "https://youtu.be/dQw4w9WgXcQ")
+        assert a.label == "plN7JMbadRg_c9aa5363"
+        assert a.transcript != b.transcript and a.audio != b.audio
+        assert a.final(1) == os.path.join("output", "plN7JMbadRg_c9aa5363", "clip_1_final.mp4")
+        assert a.clip_file(3, ".srt").endswith(os.path.join("clips", "clip_3.srt"))
+
+    def test_legacy_workspace_without_video(self):
+        from pipeline.workspace import Workspace
+        w = Workspace()
+        assert w.transcript == os.path.join("transcripts", "transcript.json")
+        assert w.final(2) == os.path.join("output", "clip_2_final.mp4")
+
+    def test_reset_from_stage_rejects_unknown(self):
+        import pytest
+        from main import reset_from_stage
+        with pytest.raises(ValueError):
+            reset_from_stage("vid", "bogus")
+
+    def test_resume_reuses_previous_video(self):
+        t = TestRunPipeline()
+        m = t._mocks()
+        m["find_prev"] = patch("main.video_repo.find_latest_by_source",
+                               return_value={"id": "old-vid", "raw_path": "input/raw_video.mp4"})
+        s = {k: v.start() for k, v in m.items()}
+        try:
+            from main import run_pipeline
+            run_pipeline("some_video.mp4", "", None)
+            s["insert"].assert_not_called()
+            s["ws"].assert_called_once_with("old-vid")
+        finally:
+            for v in m.values():
+                v.stop()
+
+    def test_fresh_and_from_stage(self):
+        t = TestRunPipeline()
+        m = t._mocks()
+        m["find_prev"] = patch("main.video_repo.find_latest_by_source",
+                               return_value={"id": "old-vid", "raw_path": "x"})
+        s = {k: v.start() for k, v in m.items()}
+        try:
+            from main import run_pipeline
+            run_pipeline("some_video.mp4", "", None, resume=False, from_stage="refine")
+            s["insert"].assert_called_once()
+            s["reset"].assert_any_call("vid-1", "refine")
+        finally:
+            for v in m.values():
+                v.stop()

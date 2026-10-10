@@ -23,15 +23,11 @@ Thank you for your interest in contributing to **Viral Clips Automator**! We wel
    pip install -r requirements.txt
    ```
 
-4. **Set Up PostgreSQL & pgvector**:
-    Ensure PostgreSQL is installed and running, then execute the schema and migrations in order:
+4. **Set Up PostgreSQL & pgvector** (Docker, port 5433 — see README step 4):
     ```bash
-    createdb viral_clips
-    psql viral_clips -f db/schema.sql
-    psql viral_clips -f db/migrate_embeddings_1024.sql
-    psql viral_clips -f db/migration_v4.sql
-    psql viral_clips -f db/migration_v5.sql
-    psql viral_clips -f db/migration_v6.sql
+    docker run -d --name viral-clips-db -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=viral_clips \
+      -p 5433:5432 -v viral_clips_pgdata:/var/lib/postgresql/data pgvector/pgvector:pg16
+    db/init_db.sh --docker viral-clips-db
     ```
 
 5. **Configure Environment Variables**:
@@ -53,7 +49,12 @@ Thank you for your interest in contributing to **Viral Clips Automator**! We wel
 2. **Code Style**:
    - Write clean, documented Python adhering to PEP 8 standards.
    - Do not commit secrets, tokens, or personal API keys.
-   - Make sure runtime output folders (`output/`, `clips/`, `downloads/`, `transcripts/`) are kept clean and not committed.
+   - Make sure runtime folders (`downloads/`, `work/`, `output/`, `logs/`, `models/`) are not committed (they are git-ignored).
+   - Never hard-code `transcripts/`, `clips/` or `output/` paths — use `pipeline.workspace.current()`.
+   - New `config.yaml` top-level sections must be added to the whitelist in `config.py:get_config()`.
+   - Run the tests before pushing: `.venv/bin/python -m pytest -q` (300 tests; needs the DB).
+   - Framing changes: compare `tools/framing_audit.py <video_id>` before/after and check the
+     `--debug-framing` videos. Read `AGENT_CONTEXT.md` (architecture) and `OPEN_ISSUES.md` first.
 
 3. **Commit Messages**:
    Follow conventional commits:

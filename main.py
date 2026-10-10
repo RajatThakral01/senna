@@ -1,11 +1,13 @@
 import sys
 import os
 import json
+import shutil
 import subprocess
 import argparse
 import time
 import yaml
-from logger import get_logger, log_stage, bind, setup_logging
+from logger import get_logger, log_stage, bind, setup_logging, run_log
+from pipeline import workspace
 from input.input_handler import handle_input
 from campaign.campaign_parser import parse_campaign
 from db.repositories import video_repo, run_repo, clip_repo
@@ -91,6 +93,81 @@ def invalidate_stage(video_id: str, stage: str) -> None:
         log.exception("invalidate_stage failed video=%.8s stage=%s", video_id, stage)
 
 
+STAGES = ("transcribe", "chunk", "audio_events", "embed", "outline",
+          "analyze", "similarity", "refine", "render")
+
+
+def reset_from_stage(video_id: str, stage: str) -> None:
+    """Redo `stage` and every later stage for an existing video.
+
+    Clears the checkpoints plus the derived rows those stages would otherwise
+    duplicate or reuse (chunks, audio events, outlines, candidates, clips,
+    related segments) and the cache fingerprints that gate them. Earlier
+    stages (e.g. the transcript) are kept.
+    """
+    if stage not in STAGES:
+        raise ValueError(f"unknown stage {stage!r}; choose from {', '.join(STAGES)}")
+    idx = STAGES.index(stage)
+    redo = list(STAGES[idx:])
+    fps = []
+    if idx <= STAGES.index("audio_events"):
+        fps.append("audio_events")
+    if idx <= STAGES.index("outline"):
+        fps.append("outline")
+    if idx <= STAGES.index("analyze"):
+        fps.append("discovery")
+    from db.connection import get_conn, release_conn
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if idx <= STAGES.index("analyze"):
+                # clips cascade to related_segments + edit_plans
+                cur.execute("DELETE FROM clips WHERE video_id=%s", (video_id,))
+                cur.execute("DELETE FROM candidates WHERE video_id=%s AND source <> 'audio_event'",
+                            (video_id,))
+            elif stage == "similarity":
+                cur.execute("""DELETE FROM related_segments
+                               WHERE clip_id IN (SELECT id FROM clips WHERE video_id=%s)""",
+                            (video_id,))
+            if idx <= STAGES.index("outline"):
+                cur.execute("DELETE FROM outlines WHERE video_id=%s", (video_id,))
+            if idx <= STAGES.index("audio_events"):
+                cur.execute("DELETE FROM audio_events WHERE video_id=%s", (video_id,))
+                cur.execute("DELETE FROM candidates WHERE video_id=%s AND source = 'audio_event'",
+                            (video_id,))
+            if idx <= STAGES.index("chunk"):
+                cur.execute("DELETE FROM chunks WHERE video_id=%s", (video_id,))
+            if fps:
+                cur.execute("DELETE FROM stage_fingerprints WHERE video_id=%s AND stage = ANY(%s)",
+                            (video_id, fps))
+            cur.execute("DELETE FROM pipeline_runs WHERE video_id=%s AND stage = ANY(%s)",
+                        (video_id, redo))
+            conn.commit()
+    finally:
+        release_conn(conn)
+    log.info("reset video=%.8s from stage=%s (redo %s)", video_id, stage, ",".join(redo))
+
+
+def _keep_awake():
+    """macOS: hold an idle-sleep assertion while a run is in progress.
+
+    A sleeping Mac pauses the pipeline (one run lost ~15 minutes this way).
+    caffeinate -w also exits on its own if this process dies. Disable with
+    runtime.keep_awake: false.
+    """
+    if sys.platform != "darwin" or not CONFIG.get("runtime", {}).get("keep_awake", True):
+        return None
+    exe = shutil.which("caffeinate")
+    if not exe:
+        return None
+    try:
+        return subprocess.Popen([exe, "-i", "-w", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        log.debug("caffeinate unavailable", exc_info=True)
+        return None
+
+
 def get_video_duration(path: str) -> float | None:
     """ffprobe duration in seconds, or None when unavailable."""
     try:
@@ -137,7 +214,8 @@ def _render_legacy_chain(clog, base_path, n, current_path, srt,
     next_path = current_path
     if srt:
         next_path = f"{base_path}_subbed.mp4"
-        ok = burn_subtitles(n, clip_path=current_path, output_path=next_path)
+        ok = burn_subtitles(n, clip_path=current_path, output_path=next_path,
+                            srt_path=f"{base_path}.srt")
         clog.info("burn_subtitles ok=%s out=%s", ok, next_path)
         if ok and os.path.exists(next_path):
             current_path = next_path
@@ -187,7 +265,8 @@ def render_clips(video_id: str, raw_video_path: str = None,
     Cut + stitch clips → full-screen 9:16 vertical crop (auto/speaker_crop/
     stacked_split/center_crop; letterbox-free under full_screen_vertical) →
     karaoke subtitles → logo → music → fades (speech fade-out off by default) →
-    output/clip_N_final.mp4, then output/report.json.
+    output/<video>/clip_N_final.mp4, then output/<video>/report.json
+    (see pipeline/workspace.py).
 
     Args:
         video_id:        UUID of the video row in the DB.
@@ -207,6 +286,9 @@ def render_clips(video_id: str, raw_video_path: str = None,
     if clip_numbers is not None:
         clip_numbers = {int(n) for n in clip_numbers}
     plog = bind("main", video_id=video_id)
+    ws = workspace.current()
+    if ws.video_id != str(video_id):
+        ws = workspace.activate(video_id)  # e.g. Review tab re-render
     if clip_numbers is not None:
         plog.info("selective re-render clips=%s", sorted(clip_numbers))
     if raw_video_path is None:
@@ -215,7 +297,8 @@ def render_clips(video_id: str, raw_video_path: str = None,
             raise ValueError(f"Unknown video_id: {video_id}")
         raw_video_path = video.get("raw_path")
         if not raw_video_path or not os.path.exists(raw_video_path):
-            raw_video_path = "input/raw_video.mp4"
+            raise FileNotFoundError(
+                f"source video for {video_id} not found at {raw_video_path!r}")
         plog.info("resolved raw path=%s", raw_video_path)
     if campaign_config is None:
         campaign_config = parse_campaign("", scan_assets())
@@ -235,6 +318,11 @@ def render_clips(video_id: str, raw_video_path: str = None,
     if progress: progress(0.85, desc="[11/11] Rendering clips...")
     final_clips = []
     if not should_skip_stage(video_id, "render"):
+        # Only a render that crashed part-way may keep the finals it already
+        # produced; a fresh render (new boundaries, framing changes, review
+        # re-render) must never reuse stale output files.
+        resuming_render = (clip_numbers is None and
+                           run_repo.get_stage_status(video_id, "render") in ("running", "failed"))
         run_repo.start_stage(video_id, "render")
         try:
             with log_stage("main", "render", video_id=video_id):
@@ -245,16 +333,17 @@ def render_clips(video_id: str, raw_video_path: str = None,
                 confirmed = clip_repo.get_confirmed_segments_for_video(video_id)
                 for c in clips:
                     c["related_segments"] = confirmed.get(c["id"], [])
-                nstitched = sum(1 for c in clips if c["related_segments"])
-                plog.info("clips with stitched continuations=%d", nstitched)
+                nlinked = sum(1 for c in clips if c["related_segments"])
+                nstitched = sum(1 for c in clips if len(get_time_ranges_for_clip(c)) > 1)
+                plog.info("clips with linked continuations=%d, rendered as multi-part=%d",
+                          nlinked, nstitched)
 
                 # Load full transcript for SRT generation
-                with open('transcripts/transcript.json', 'r') as f:
+                with open(ws.transcript, 'r') as f:
                     transcript_result = json.load(f)
                 plog.debug("loaded transcript segments=%d", len(transcript_result.get("segments", [])))
 
-                os.makedirs("clips", exist_ok=True)
-                os.makedirs("output", exist_ok=True)
+                ws.ensure()
 
                 ffmpeg_bin = _ffmpeg_bin()
                 plog.debug("ffmpeg path=%s", ffmpeg_bin)
@@ -267,7 +356,7 @@ def render_clips(video_id: str, raw_video_path: str = None,
                     clips = [c for c in clips if c["clip_number"] in clip_numbers]
                     plog.info("selective subset clips=%d", len(clips))
 
-                cut_clip_results = cut_clips(raw_video_path, clips)
+                cut_clip_results = cut_clips(raw_video_path, clips, output_dir=ws.clips_dir)
                 plog.info("cut_clips produced=%d/%d", len(cut_clip_results), len(clips))
                 for c in clips:
                     if c["related_segments"]:
@@ -276,18 +365,20 @@ def render_clips(video_id: str, raw_video_path: str = None,
                 for i, clip in enumerate(clips):
                     n = clip['clip_number']
                     clog = bind("main", video_id=video_id, stage="render", clip_number=n)
-                    # Resumable render: skip clips whose final already exists
-                    final_path = f"output/clip_{n}_final.mp4"
+                    final_path = ws.final(n)
                     if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                        clog.info("render clip already done, skipping final=%s", final_path)
-                        clip_repo.update_output_path(clip["id"], final_path)
-                        final_clips.append({'file': final_path})
-                        continue
+                        if resuming_render:
+                            # crash resume: this clip finished before the crash
+                            clog.info("render clip already done, skipping final=%s", final_path)
+                            clip_repo.update_output_path(clip["id"], final_path)
+                            final_clips.append({'file': final_path})
+                            continue
+                        os.remove(final_path)  # stale output from an earlier render
                     ranges = get_time_ranges_for_clip(clip)
                     clog.info("render clip ranges=%s title=%.60s",
                               [(round(a, 1), round(b, 1)) for a, b in ranges],
                               clip.get("suggested_title", ""))
-                    base_path = f"clips/clip_{n}"
+                    base_path = os.path.join(ws.clips_dir, f"clip_{n}")
                     clip_raw = f"{base_path}.mp4"
                     clip_vert = f"{base_path}_vertical.mp4"
 
@@ -342,12 +433,12 @@ def render_clips(video_id: str, raw_video_path: str = None,
 
                     current_path = clip_vert
                     next_path = current_path
-                    final_path = f"output/clip_{n}_final.mp4"
+                    final_path = ws.final(n)
 
                     # --- captions data (shared by polish + legacy paths) ---
                     srt, cap_data = "", None
                     if campaign_config.get("subtitles", True):
-                        srt_path = f"clips/clip_{n}.srt"
+                        srt_path = f"{base_path}.srt"
                         clog.debug("generating SRT ranges=%s", ranges)
                         srt, tl_map = generate_srt_for_ranges(
                             transcript_result['segments'], ranges, n)
@@ -448,6 +539,17 @@ def render_clips(video_id: str, raw_video_path: str = None,
                         clog.debug("layout/refine persist skipped", exc_info=True)
                     final_clips.append({'file': next_path})
                     clog.info("render clip done final=%s", next_path)
+                    if not CONFIG.get("export", {}).get("keep_intermediates", False):
+                        # cut + vertical + legacy-chain files are ~60MB per clip;
+                        # SRT, edit plan and debug video are kept. Review re-renders
+                        # re-cut from the source, so nothing is lost.
+                        for _f in (clip_raw, clip_vert, f"{base_path}_subbed.mp4",
+                                   f"{base_path}_logo.mp4", f"{base_path}_music.mp4"):
+                            try:
+                                if os.path.exists(_f) and os.path.abspath(_f) != os.path.abspath(next_path):
+                                    os.remove(_f)
+                            except OSError:
+                                clog.debug("could not remove intermediate %s", _f)
 
                 plog.info("render complete finals=%d", len(final_clips))
             run_repo.complete_stage(video_id, "render")
@@ -457,8 +559,12 @@ def render_clips(video_id: str, raw_video_path: str = None,
             raise
     else:
         plog.info("render skipped (already done)")
-        clips = clip_repo.get_clips_for_video(video_id)
-        final_clips = [{"file": c.get("output_path") or f"output/clip_{c['clip_number']}_final.mp4"} for c in clips]
+        clips, _ = select_renderable_clips(clip_repo.get_clips_for_video(video_id))
+        final_clips = []
+        for c in clips:
+            f = c.get("output_path") or ws.final(c['clip_number'])
+            if os.path.exists(f):
+                final_clips.append({"file": f})
 
     # Generate final report.json from DB query
     with log_stage("main", "report", video_id=video_id):
@@ -491,13 +597,50 @@ def render_clips(video_id: str, raw_video_path: str = None,
                 "suggested_title": c["suggested_title"],
                 "output_file": c["output_path"]
             })
-        with open("output/report.json", "w") as f:
+        ws.ensure()
+        with open(ws.report, "w") as f:
             json.dump(report, f, indent=2)
-    plog.info("report written clips=%d path=output/report.json", len(report))
+    plog.info("report written clips=%d path=%s", len(report), ws.report)
     return final_clips
 
 def run_pipeline(video_input: str, campaign_description: str = None, template: str = None, progress=None,
-               layout: str = None):
+                 layout: str = None, resume: bool = True, from_stage: str = None,
+                 video_id: str = None, campaign_config: dict = None, render: bool = True,
+                 info: dict = None):
+    """Run the full pipeline for one source.
+
+    resume:     reuse the latest video row for the same source, skipping
+                stages that already finished (False = brand-new run).
+    from_stage: redo this stage and everything after it (see STAGES).
+    video_id:   continue a specific existing video (wins over resume).
+    campaign_config: ready render flags (subtitles/logo/music/fade/layout);
+                skips brief parsing — campaign_description is then only the
+                analysis focus (campaign clip mode).
+    render:     False stops after boundary refinement (the caller renders).
+    info:       optional dict filled with video_id / raw_path / workspace.
+
+    Each run also writes logs/runs/<timestamp>_<source>.log and, on macOS,
+    keeps the machine awake until it finishes.
+    """
+    awake = _keep_awake()
+    try:
+        with run_log(workspace.source_key(video_input)) as run_log_path:
+            log.info("run log file=%s", run_log_path)
+            return _run_pipeline_impl(video_input, campaign_description, template, progress,
+                                      layout, resume, from_stage, video_id,
+                                      campaign_config=campaign_config, render=render,
+                                      info=info)
+    finally:
+        if awake is not None:
+            try:
+                awake.terminate()
+            except Exception:
+                pass
+
+
+def _run_pipeline_impl(video_input, campaign_description, template, progress,
+                       layout, resume, from_stage, video_id, campaign_config=None,
+                       render=True, info=None):
     t0 = time.monotonic()
     log.info("=== PIPELINE START input=%.120s template=%s layout=%s ===", video_input, template, layout)
     if layout:
@@ -508,17 +651,40 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
         raw_video_path = handle_input(video_input)
     log.info("input normalized path=%s", raw_video_path)
 
-    # Step 2: Insert Video into DB
-    video_id = video_repo.insert_video(video_input, raw_video_path)
+    # Step 2: Register the video, or resume the previous run of this source
+    if video_id is None and resume:
+        prev = video_repo.find_latest_by_source(video_input)
+        if prev:
+            video_id = prev["id"]
+            log.info("resuming video=%.8s for this source (finished stages are "
+                     "skipped; use --fresh to start over)", video_id)
+    if video_id is None:
+        video_id = video_repo.insert_video(video_input, raw_video_path)
+        log.info("video registered in DB id=%.8s", video_id)
+    elif (video_repo.get_video(video_id) or {}).get("raw_path") != raw_video_path:
+        video_repo.update_raw_path(video_id, raw_video_path)
     plog = bind("main", video_id=video_id)
-    plog.info("video registered in DB")
+    ws = workspace.activate(video_id)
+    if info is not None:
+        info.update(video_id=str(video_id), raw_path=raw_video_path, workspace=ws)
+    if from_stage:
+        reset_from_stage(video_id, from_stage)
+    if (run_repo.get_stage_status(video_id, "transcribe") == "done"
+            and not os.path.exists(ws.transcript)):
+        plog.warning("transcript missing from workspace %s; redoing from transcribe",
+                     ws.work_dir)
+        reset_from_stage(video_id, "transcribe")
     if progress: progress(0.08, desc=f"Registered video {str(video_id)[:8]}")
 
     # Parse campaign
     if progress: progress(0.1, desc="[2/10] Parsing campaign...")
     with log_stage("main", "campaign", video_id=video_id):
-        available_assets = scan_assets()
-        campaign_config = parse_campaign(campaign_description or "", available_assets)
+        if campaign_config is not None:
+            campaign_config = dict(campaign_config)
+            plog.info("campaign config supplied by caller; brief parsing skipped")
+        else:
+            available_assets = scan_assets()
+            campaign_config = parse_campaign(campaign_description or "", available_assets)
         if template or campaign_config.get("template"):
             tmpl_name = template or campaign_config["template"]
             if os.path.exists(f"campaign/templates/{tmpl_name}.json"):
@@ -542,8 +708,8 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
         try:
             with log_stage("main", "transcribe", video_id=video_id):
                 # Extract audio first if transcriber needs it
-                audio_path = "downloads/audio.wav"
-                os.makedirs("downloads", exist_ok=True)
+                audio_path = ws.audio  # per video: never another video's audio
+                os.makedirs(ws.work_dir, exist_ok=True)
                 ffmpeg_bin = _ffmpeg_bin()
                 if not os.path.exists(audio_path):
                     plog.info("extracting audio src=%s dst=%s", raw_video_path, audio_path)
@@ -555,7 +721,8 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
                 else:
                     plog.info("reusing cached audio path=%s", audio_path)
 
-                transcript_path, transcript_result = transcribe_audio(audio_path)
+                transcript_path, transcript_result = transcribe_audio(
+                    audio_path, output_dir=ws.transcripts_dir)
                 nseg = len((transcript_result or {}).get("segments", [])) if isinstance(transcript_result, dict) else -1
                 plog.info("transcribed segments=%d path=%s", nseg, transcript_path)
             run_repo.complete_stage(video_id, "transcribe")
@@ -564,7 +731,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
             run_repo.fail_stage(video_id, "transcribe", str(e))
             raise
     else:
-        transcript_path = "transcripts/transcript.json"
+        transcript_path = ws.transcript
         plog.info("transcribe skipped, using cached path=%s", transcript_path)
 
     # Step 4: Chunk
@@ -586,8 +753,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
     _afp_now = None
     try:
         import os as _os2
-        _wav_probe = ("downloads/audio.wav"
-                      if _os2.path.exists("downloads/audio.wav") else raw_video_path)
+        _wav_probe = (ws.audio if _os2.path.exists(ws.audio) else raw_video_path)
         _d = get_video_duration(_wav_probe) or 0
         _asig = (f"{_wav_probe}:{round(_d, 1)}:"
                  f"{_os2.path.getsize(_wav_probe)}")
@@ -612,7 +778,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
                 from db.repositories import candidate_repo
                 a_cfg = dict(CONFIG.get("audio_events", {}))
                 if a_cfg.get("enabled", True):
-                    wav = ensure_source_audio(raw_video_path, "downloads/audio.wav")
+                    wav = ensure_source_audio(raw_video_path, ws.audio)
                     events, _ = detect_audio_events(wav, CONFIG)
                     # optional labels (disabled by default; never faked)
                     try:
@@ -622,7 +788,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
                         _y, _sr = None, 16000
                     events, _cstat = classify_events(events, _y, _sr, CONFIG)
                     persist_events(video_id, events)
-                    _words = load_words("transcripts/transcript.json")
+                    _words = load_words(ws.transcript)
                     _sents = build_sentences(_words)
                     cues = propose_from_events(events, _words, _sents, CONFIG)
                     cues = enrich_event_candidates(cues, CONFIG)
@@ -668,7 +834,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
 
     # Step 7: Outline (whole-video structure; fingerprint-gated)
     if progress: progress(0.55, desc="[7/11] Outlining video...")
-    _tsig = transcript_signature("transcripts/transcript.json")
+    _tsig = transcript_signature(ws.transcript)
     _ofp = outline_fingerprint(_tsig, CONFIG.get("ai", {}).get("llm_model", ""), CONFIG)
     _outline_stale = (not run_repo.fingerprint_matches(video_id, "outline", _ofp))
     if _outline_stale and run_repo.get_stage_status(video_id, "outline") == "done":
@@ -681,7 +847,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
             with log_stage("main", "outline", video_id=video_id):
                 from pipeline.boundaries import load_words, build_sentences
                 from pipeline.outline import build_outline, persist_outline
-                _words = load_words("transcripts/transcript.json")
+                _words = load_words(ws.transcript)
                 _sents = build_sentences(_words)
                 _ol = build_outline(_words, _sents, None, cfg=CONFIG)
                 persist_outline(video_id, _ol)
@@ -744,7 +910,7 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
                 if refine_cfg.get("enabled", True):
                     vid_dur = get_video_duration(raw_video_path)
                     refined = refine_all_clips(
-                        clips, transcript_path="transcripts/transcript.json",
+                        clips, transcript_path=ws.transcript,
                         video_duration=vid_dur,
                         cfg={**CONFIG, **refine_cfg})
                     nrej = sum(1 for c in refined if c.get("refine_status") == "rejected")
@@ -770,19 +936,27 @@ def run_pipeline(video_input: str, campaign_description: str = None, template: s
             run_repo.fail_stage(video_id, "refine", str(e))
             raise
 
+    if not render:
+        plog.info("=== PIPELINE STOPPED BEFORE RENDER (caller renders) elapsed=%.1fs ===",
+                  time.monotonic() - t0)
+        return []
+
     # Step 11: Render (extracted - see render_clips())
     final_clips = render_clips(video_id, raw_video_path, campaign_config, progress,
                                layout=layout)
 
     elapsed = time.monotonic() - t0
-    plog.info("=== PIPELINE COMPLETE clips=%d elapsed=%.1fs report=output/report.json ===",
-              len(final_clips), elapsed)
+    plog.info("=== PIPELINE COMPLETE clips=%d elapsed=%.1fs report=%s ===",
+              len(final_clips), elapsed, ws.report)
     log.info("=== PIPELINE COMPLETE video=%.8s clips=%d elapsed=%.1fs ===",
              video_id, len(final_clips), elapsed)
 
     return final_clips
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("campaign", "job"):
+        from campaign.cli import main as campaign_main   # campaign jobs (C5)
+        sys.exit(campaign_main(sys.argv[1:]))
     parser = argparse.ArgumentParser(description="Viral Clips Automator")
     parser.add_argument("video_input", nargs='?', default=None, help="URL or local path to the video")
     parser.add_argument("--campaign", help="Natural language description of the campaign", default="")
@@ -792,11 +966,23 @@ def main():
     parser.add_argument("--no-refine", help="Skip boundary refinement (keep analyzer timestamps)",
                         action="store_true")
     parser.add_argument("--log-level", help="Override log level (DEBUG/INFO/WARNING/ERROR)", default=None)
+    parser.add_argument("--fresh", action="store_true",
+                        help="Start a new run even if this source was processed before "
+                             "(default: resume it, skipping finished stages)")
+    parser.add_argument("--from-stage", choices=STAGES, default=None,
+                        help="Redo this stage and everything after it for the resumed video")
+    parser.add_argument("--video-id", default=None,
+                        help="Continue a specific existing video id")
+    parser.add_argument("--debug-framing", action="store_true",
+                        help="Also write side-by-side framing debug videos "
+                             "(work/<video>/clips/clip_N_vertical_debug.mp4)")
 
     args = parser.parse_args()
     if args.log_level:
         setup_logging(level=args.log_level.upper(), force=True)
         log.info("log level overridden to %s", args.log_level.upper())
+    if args.debug_framing:
+        CONFIG.setdefault("framing", {})["debug_video"] = True
     if args.no_refine:
         try:
             CONFIG["refine"]["enabled"] = False
@@ -811,7 +997,8 @@ def main():
                  args.video_input, args.campaign, args.template, args.layout)
         try:
             run_pipeline(args.video_input, args.campaign, args.template,
-                         layout=args.layout)
+                         layout=args.layout, resume=not args.fresh,
+                         from_stage=args.from_stage, video_id=args.video_id)
         except Exception:
             log.exception("CLI pipeline failed")
             raise

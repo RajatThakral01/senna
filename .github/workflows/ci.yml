@@ -33,3 +33,41 @@ jobs:
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv,venv,htmlcov,.pytest_cache
         # exit-zero treats all errors as warnings.
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude=.venv,venv,htmlcov,.pytest_cache
+
+  tests:
+    # Full pytest suite (LLM/network calls are mocked) against a real
+    # pgvector database, like the local Docker setup.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: viral_clips
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: viral_clips
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+    - name: System packages
+      run: sudo apt-get update && sudo apt-get install -y ffmpeg postgresql-client
+    - name: Python dependencies (CPU-only torch)
+      run: |
+        python -m pip install --upgrade pip
+        pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+    - name: Database schema
+      run: db/init_db.sh
+    - name: Tests
+      run: python -m pytest -q

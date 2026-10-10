@@ -77,7 +77,7 @@ def build_edit_plan(clip, campaign_config=None, config=None,
                      ("enabled", "renderer", "max_words", "max_chars",
                       "max_duration", "font", "font_size", "placement")},
         "framing": {k: framing_cfg.get(k) for k in
-                    ("sample_interval", "deadzone_ratio", "smooth_factor",
+                    ("sample_interval", "deadzone_ratio", "path_smooth_seconds",
                      "headroom_ratio", "max_zoom", "branded_background",
                      "full_screen_vertical", "work_area", "min_face_fraction")},
         "audio": audio_cfg,
@@ -174,8 +174,10 @@ def build_edit_plan(clip, campaign_config=None, config=None,
 
 def save_plan_file(clip_number, plan):
     import os
-    os.makedirs("clips", exist_ok=True)
-    path = f"clips/clip_{clip_number}_plan.json"
+    from pipeline.workspace import current
+    ws = current()
+    os.makedirs(ws.clips_dir, exist_ok=True)
+    path = ws.clip_file(clip_number, "_plan.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(plan, f, indent=2, ensure_ascii=False)
     return path

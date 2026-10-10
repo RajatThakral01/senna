@@ -205,7 +205,7 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
     """Two-pass contextual analysis.
 
     Pass 1 (outline): whole-video structure from the transcript (cached in
-    the outlines table + transcripts/outline.json).
+    the outlines table + <workspace>/outline.json).
     Pass 2 (discovery): candidates with source sentence IDs from the outline
     + original transcript; timestamps derived from word data and validated.
 
@@ -228,7 +228,8 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
     log.info("analyze start video=%.8s chunks=%d target=%d", video_id, len(chunks), target)
 
     try:
-        words = load_words("transcripts/transcript.json")
+        from pipeline.workspace import current as _ws
+        words = load_words(_ws().transcript)
         sentences = build_sentences(words)
     except Exception:
         log.exception("analyze transcript load failed, legacy fallback")
@@ -237,7 +238,7 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
     clips = []
     outline = None
     if words and sentences:
-        tsig = transcript_signature("transcripts/transcript.json")
+        tsig = transcript_signature(_ws().transcript)
         # Pass 1: reuse cached outline when the fingerprint matches
         outline = None
         try:
@@ -628,10 +629,12 @@ def _analyze_legacy(video_id: str, chunks: list[dict], config: dict) -> list[dic
 
 
 def _write_clips_analysis_json(clips: list[dict]) -> None:
-    """Save clips to transcripts/clips_analysis.json (embeddings stripped)."""
+    """Save clips to <workspace>/clips_analysis.json (embeddings stripped)."""
     import os
-    os.makedirs('transcripts', exist_ok=True)
-    with open('transcripts/clips_analysis.json', 'w') as f:
+    from pipeline.workspace import current
+    out_dir = current().transcripts_dir
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'clips_analysis.json'), 'w') as f:
         # We need to make sure uuid/datetime are serializable or just save the primitive fields
         safe_clips = []
         for c in clips:
@@ -641,7 +644,7 @@ def _write_clips_analysis_json(clips: list[dict]) -> None:
             if 'embedding' in safe_c: del safe_c['embedding']
             safe_clips.append(safe_c)
         json.dump(safe_clips, f, indent=2)
-    log.debug("wrote transcripts/clips_analysis.json clips=%d", len(safe_clips))
+    log.debug("wrote clips_analysis.json dir=%s clips=%d", out_dir, len(safe_clips))
 
 
 def _deduplicate_clips(clips: list[dict], overlap_threshold_seconds: float) -> list[dict]:

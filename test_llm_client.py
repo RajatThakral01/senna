@@ -85,7 +85,9 @@ class TestRotation:
                 assert labels == ["Bearer dead", "Bearer k2"]
 
     def test_all_fail_raises_last(self):
-        with _keys(GROQ_API_KEY="k1"):
+        # waiting for rate-limit resets disabled: fail straight away
+        with _keys(GROQ_API_KEY="k1"), \
+                patch.dict("os.environ", {"LLM_RATE_LIMIT_MAX_WAIT": "0"}):
             with patch("pipeline.llm_client.requests.post") as mp:
                 mp.return_value = _resp(429)
                 with pytest.raises(requests.exceptions.HTTPError):
@@ -96,3 +98,95 @@ class TestRotation:
         with _keys():
             with pytest.raises(requests.exceptions.ConnectionError):
                 post_chat({"model": "m"}, timeout=10, slot=1)
+
+
+class TestReasoningHeadroomAndJsonMode:
+    def _resp(self, status=200, body=None):
+        from unittest.mock import MagicMock
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = body or {"choices": [{"finish_reason": "stop",
+                                                     "message": {"content": "{}"}}]}
+        r.raise_for_status.return_value = None
+        return r
+
+    def test_headroom_added_for_reasoning_model(self):
+        from pipeline.llm_client import _prepare_payload
+        p = _prepare_payload({"model": "openai/gpt-oss-120b", "max_tokens": 400}, False)
+        assert p["max_tokens"] == 4400 and "response_format" not in p
+        q = _prepare_payload({"model": "llama-3.3-70b", "max_tokens": 400}, True)
+        assert q["max_tokens"] == 400
+        assert q["response_format"] == {"type": "json_object"}
+
+    def test_json_mode_rejection_retries_without_json_mode(self, monkeypatch):
+        from unittest.mock import patch
+        import pipeline.llm_client as L
+        monkeypatch.setattr(L, "_ordered_keys", lambda slot: [("key1", "k")])
+        bad = self._resp(400, {"error": {"code": "json_validate_failed",
+                                         "message": "Failed to generate JSON"}})
+        good = self._resp()
+        with patch.object(L.requests, "post", side_effect=[bad, good]) as post:
+            r = L.post_chat({"model": "openai/gpt-oss-120b", "max_tokens": 10},
+                            timeout=5, slot=1, json_mode=True)
+        assert r is good and post.call_count == 2
+        assert "response_format" in post.call_args_list[0].kwargs["json"]
+        assert "response_format" not in post.call_args_list[1].kwargs["json"]
+
+
+class TestRateLimitWait:
+    def _r(self, status, msg="", headers=None):
+        from unittest.mock import MagicMock
+        r = MagicMock()
+        r.status_code = status
+        r.headers = headers or {}
+        r.json.return_value = ({"error": {"message": msg}} if status == 429 else
+                               {"choices": [{"finish_reason": "stop",
+                                             "message": {"content": "{}"}}]})
+        r.raise_for_status.return_value = None
+        return r
+
+    def test_parse_wait(self):
+        from pipeline.llm_client import _rate_wait, _parse_duration
+        assert _parse_duration("1m2.5s") == 62.5 and _parse_duration("450ms") == 0.45
+        w, daily = _rate_wait(self._r(429, "Rate limit reached on tokens per minute "
+                                           "(TPM). Please try again in 4.5s."))
+        assert w == 5.0 and daily is False
+        w, daily = _rate_wait(self._r(429, "", {"retry-after": "12"}))
+        assert w == 12.5
+        assert _rate_wait(self._r(429, "Limit on tokens per day (TPD)"))[1] is True
+
+    def test_waits_then_succeeds_when_all_keys_limited(self, monkeypatch):
+        from unittest.mock import patch
+        import pipeline.llm_client as L
+        monkeypatch.setattr(L, "_ordered_keys", lambda s: [("key1", "a"), ("key2", "b")])
+        slept = []
+        monkeypatch.setattr(L.time, "sleep", lambda s: slept.append(s))
+        lim = self._r(429, "try again in 3s")
+        ok = self._r(200)
+        with patch.object(L.requests, "post", side_effect=[lim, lim, ok]):
+            r = L.post_chat({"model": "m", "max_tokens": 5}, timeout=5, slot=1)
+        assert r is ok and slept == [3.5]
+
+    def test_daily_limit_fails_fast(self, monkeypatch):
+        import pytest
+        from unittest.mock import patch
+        import pipeline.llm_client as L
+        monkeypatch.setattr(L, "_ordered_keys", lambda s: [("key1", "a")])
+        monkeypatch.setattr(L.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("slept")))
+        with patch.object(L.requests, "post",
+                          return_value=self._r(429, "Limit reached on tokens per day (TPD)")):
+            with pytest.raises(L.requests.exceptions.HTTPError):
+                L.post_chat({"model": "m", "max_tokens": 5}, timeout=5, slot=1)
+
+    def test_wait_budget_respected(self, monkeypatch):
+        import pytest
+        from unittest.mock import patch
+        import pipeline.llm_client as L
+        monkeypatch.setattr(L, "_ordered_keys", lambda s: [("key1", "a")])
+        monkeypatch.setenv("LLM_RATE_LIMIT_MAX_WAIT", "10")
+        slept = []
+        monkeypatch.setattr(L.time, "sleep", lambda s: slept.append(s))
+        with patch.object(L.requests, "post", return_value=self._r(429, "try again in 4s")):
+            with pytest.raises(L.requests.exceptions.HTTPError):
+                L.post_chat({"model": "m", "max_tokens": 5}, timeout=5, slot=1)
+        assert sum(slept) <= 10

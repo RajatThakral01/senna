@@ -29,9 +29,18 @@ MIN_SOURCE_HEIGHT = int(os.getenv("YT_MIN_HEIGHT", "720"))
 
 # HD-first format ladder: 720p+ mp4 preferred, any 720p+ next, plain best
 # only as a last resort (still gated by the resolution probe below).
-HQ_FORMAT = ('bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/'
-             'bestvideo[height>=720]+bestaudio/'
-             'best[height>=720]/best')
+# Cap at YT_MAX_HEIGHT (default 1080): output is 1080x1920, and 4K sources
+# (often AV1) make every decode/sample/render step ~3-4x slower on CPU.
+# Set YT_MAX_HEIGHT=2160 for sharper auto-zoom close-ups on a fast machine.
+MAX_SOURCE_HEIGHT = int(os.getenv("YT_MAX_HEIGHT", "1080"))
+_H = f"[height>=720][height<={MAX_SOURCE_HEIGHT}]"
+# H.264 first: fastest to decode on CPU (every clip is cut from this file);
+# AV1/VP9 at the same height are smaller but several times slower to decode.
+HQ_FORMAT = (f'bestvideo{_H}[vcodec^=avc1]+bestaudio[ext=m4a]/'
+             f'bestvideo{_H}[ext=mp4]+bestaudio[ext=m4a]/'
+             f'bestvideo{_H}+bestaudio/'
+             f'best{_H}/'
+             'bestvideo[height>=720]+bestaudio/best')
 
 
 def _js_runtime_args() -> list:
@@ -62,7 +71,9 @@ def _probe_height(path: str) -> int:
         return 0
 
 def detect_source_type(input_string: str) -> str:
-    if "youtube.com" in input_string or "youtu.be" in input_string:
+    if os.path.isfile(input_string):
+        st = "local_file"  # any existing path, relative or absolute
+    elif "youtube.com" in input_string or "youtu.be" in input_string:
         st = "youtube_live" if "live" in input_string else "youtube"
     elif "drive.google.com" in input_string:
         st = "google_drive"
@@ -90,7 +101,7 @@ def _run_yt_dlp(cmd: list, label: str):
         raise subprocess.CalledProcessError(r.returncode, cmd, output=r.stdout, stderr=r.stderr)
     return r
 
-def _handle_youtube(url: str):
+def _handle_youtube(url: str, output_path: str = "input/raw_video.mp4"):
     """Handles standard YouTube video downloads using yt-dlp.
 
     Client ladder (first probe pass wins):
@@ -104,7 +115,8 @@ def _handle_youtube(url: str):
     """
     log.info("youtube download start url=%.100s (min %dp)", url, MIN_SOURCE_HEIGHT)
     t0 = time.monotonic()
-    OUTPUT_PATH = "input/raw_video.mp4"
+    OUTPUT_PATH = output_path
+    os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
     js = _js_runtime_args()
     attempts = [
         ("youtube-hq", [
@@ -117,6 +129,13 @@ def _handle_youtube(url: str):
             '-o', OUTPUT_PATH,
             url
         ]),
+    ]
+    # Second HD pass with the same command: a long video stream can outlive
+    # the signed URL of the audio stream (HTTP 403 on the audio after the
+    # video finished). yt-dlp keeps the finished stream file, re-extracts
+    # fresh URLs and only fetches what is missing.
+    attempts.append(("youtube-hq-retry", list(attempts[0][1])))
+    attempts += [
         ("youtube-android-fallback", [
             *_ytdlp(),
             '--extractor-args', 'youtube:player_client=android',
@@ -130,7 +149,10 @@ def _handle_youtube(url: str):
         ]),
     ]
     last_error = None
+    prev_errored = False
     for label, cmd in attempts:
+        if label == "youtube-hq-retry" and not prev_errored:
+            continue  # HQ ran but was SD: the same command can't do better
         # drop a stale SD file so the probe below always checks this attempt
         try:
             if os.path.exists(OUTPUT_PATH):
@@ -142,7 +164,9 @@ def _handle_youtube(url: str):
         except subprocess.CalledProcessError as e:
             log.warning("%s failed, trying next client", label)
             last_error = e
+            prev_errored = True
             continue
+        prev_errored = False
         height = _probe_height(OUTPUT_PATH)
         log.info("%s done height=%dp", label, height)
         if height >= MIN_SOURCE_HEIGHT:
@@ -162,11 +186,12 @@ def _handle_youtube(url: str):
     size = os.path.getsize(OUTPUT_PATH) if os.path.exists(OUTPUT_PATH) else -1
     log.info("youtube download done bytes=%d elapsed=%.1fs path=%s", size, time.monotonic() - t0, OUTPUT_PATH)
 
-def _handle_youtube_live(url: str):
+def _handle_youtube_live(url: str, output_path: str = "input/raw_video.mp4"):
     """Handles YouTube live streams, recording for 300 seconds."""
     log.info("youtube-live record start (max 300s) url=%.100s", url)
     t0 = time.monotonic()
-    OUTPUT_PATH = "input/raw_video.mp4"
+    OUTPUT_PATH = output_path
+    os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
     cmd = [
         *_ytdlp(),
         '--live-from-start',
@@ -206,25 +231,68 @@ def download_direct_url(url: str, output_path: str):
                 total += len(chunk)
     log.info("direct download done bytes=%d elapsed=%.1fs", total, time.monotonic() - t0)
 
+def _cached_source_ok(path: str) -> bool:
+    """A previous download is reusable: non-empty, >= MIN_SOURCE_HEIGHT, has audio."""
+    if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+        return False
+    if _probe_height(path) < MIN_SOURCE_HEIGHT:
+        return False
+    try:
+        from config import ffprobe_path
+        r = subprocess.run([ffprobe_path(), "-v", "error", "-select_streams", "a",
+                            "-show_entries", "stream=index", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=60)
+        return bool((r.stdout or "").strip())
+    except Exception:
+        return False
+
+
+def download_path_for(input_string: str, source_type: str = None) -> str:
+    """Where a remote source is cached: downloads/<source-key>.mp4."""
+    from pipeline.workspace import source_key, DOWNLOAD_ROOT
+    st = source_type or detect_source_type(input_string)
+    key = source_key(input_string)
+    if st == "direct_url":
+        import hashlib
+        key = f"{key}_{hashlib.sha1(input_string.encode()).hexdigest()[:8]}"
+    if st == "youtube_live":
+        key += "_live"
+    return os.path.join(DOWNLOAD_ROOT, f"{key}.mp4")
+
+
 def handle_input(input_string: str) -> str:
+    """Resolve any source to a local video file and return its path.
+
+    Remote sources are downloaded once to downloads/<key>.mp4 and reused on
+    later runs (a 58-minute 1080p source is ~2GB; re-downloading also risks
+    YouTube 403s). Local files are used in place — no copy. Live streams are
+    always re-recorded.
+    """
     log.info("handle_input src=%.120s", input_string)
     source_type = detect_source_type(input_string)
-    output_path = "input/raw_video.mp4"
-    os.makedirs("input", exist_ok=True)
-
-    if source_type == "youtube":
-        _handle_youtube(input_string)
-    elif source_type == "youtube_live":
-        _handle_youtube_live(input_string)
-    elif source_type == "google_drive":
-        download_from_drive(input_string, output_path)
-    elif source_type == "local_file":
-        copy_local_file(input_string, output_path)
-    elif source_type == "direct_url":
-        download_direct_url(input_string, output_path)
-    else:
+    if source_type == "unknown":
         log.error("unknown source type input=%.120s", input_string)
         raise ValueError(f"Unknown or unsupported source type for input: {input_string}")
+    if source_type == "local_file":
+        if not os.path.isfile(input_string):
+            log.error("local file missing src=%s", input_string)
+            raise FileNotFoundError(input_string)
+        log.info("handle_input done type=local_file path=%s (used in place)", input_string)
+        return input_string
+
+    output_path = download_path_for(input_string, source_type)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if source_type != "youtube_live" and _cached_source_ok(output_path):
+        log.info("reusing cached download path=%s", output_path)
+        return output_path
+    if source_type == "youtube":
+        _handle_youtube(input_string, output_path)
+    elif source_type == "youtube_live":
+        _handle_youtube_live(input_string, output_path)
+    elif source_type == "google_drive":
+        download_from_drive(input_string, output_path)
+    elif source_type == "direct_url":
+        download_direct_url(input_string, output_path)
 
     log.info("handle_input done type=%s path=%s", source_type, output_path)
     return output_path

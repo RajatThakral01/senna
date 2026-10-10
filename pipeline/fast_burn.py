@@ -139,10 +139,12 @@ def _run_burn_pass(clip_num, pass_no, passes, clip_path, output_path, subtitles)
         return False
     return True
 
-def burn_subtitles(clip_num, clip_path, output_path, max_per_pass=80):
+def burn_subtitles(clip_num, clip_path, output_path, max_per_pass=80, srt_path=None):
     # Windows caps command lines at ~32K chars; a 200+ word karaoke chain
     # exceeds that, so long subtitle lists are burned in sequential passes.
-    srt_path = f"clips/clip_{clip_num}.srt"
+    if srt_path is None:
+        from pipeline.workspace import current
+        srt_path = current().clip_file(clip_num, ".srt")
     t0 = time.monotonic()
     log.info("burn start clip=%s in=%.60s out=%.60s", clip_num, clip_path, output_path)
 

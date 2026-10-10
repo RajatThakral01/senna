@@ -48,6 +48,21 @@ class TestAnalyzerHelpers:
 
 
 class TestExtractClips:
+    """Network is mocked; a fake key pool keeps these hermetic (they used to
+    pass only when real GROQ keys happened to be in .env)."""
+
+    @staticmethod
+    def setup_method(_):
+        import os
+        TestExtractClips._env = patch.dict(os.environ, {
+            "GROQ_API_KEY": "gsk_test_key_1", "GROQ_API_KEY_2": "", "GROQ_API_KEY_3": "",
+            "GROQ_API_KEY_FALLBACK": "", "GROQ_API_KEY_4": ""})
+        TestExtractClips._env.start()
+
+    @staticmethod
+    def teardown_method(_):
+        TestExtractClips._env.stop()
+
     def _chunk(self):
         return {"chunk_index": 0, "start_time": 0.0, "end_time": 120.0,
                 "text": "Hello world. This is a test of the clip extractor."}

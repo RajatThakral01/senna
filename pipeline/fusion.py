@@ -319,7 +319,12 @@ def deduplicate_refined(clips, iou_threshold=0.5, sim_threshold=0.92,
         except (KeyError, TypeError, ValueError):
             return []
 
-    ordered = sorted(clips, key=_score, reverse=True)
+    # Already-rejected clips (e.g. no payoff) will never render: they must not
+    # count as the "original" that other clips are duplicates of.
+    ordered = sorted((c for c in clips if c.get("refine_status") != "rejected"),
+                     key=_score, reverse=True)
+    if not ordered:
+        return [], []
     texts = [f"{c.get('hook', '')} {c.get('reason', '')}" for c in ordered]
     sims = _content_similarity(texts) if len(ordered) > 1 else [[1.0]]
     kept, dropped = [], []

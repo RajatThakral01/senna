@@ -142,3 +142,101 @@ class TestStitchedSubtitles:
         assert "00:00:02" in srt  # second range starts at output 2s
         lines = [l for l in srt.splitlines() if l.strip() and "-->" in l]
         assert len(lines) == 8  # all 8 words kept, none dropped/duplicated
+
+
+class TestPayoffExtension:
+    """The selected ending is checked, and extended forward to the payoff."""
+
+    def _story(self):
+        # setup (0-4), unfinished line, then the punchline ~20s later
+        words = _words(["So", "we", "opened", "the", "box.",
+                        "And", "inside", "was."])
+        t = words[-1]["end"] + 20.0
+        for w in ["A", "live", "goat!"]:
+            words.append({"word": w, "start": t, "end": t + 0.3})
+            t += 0.4
+        return words, build_sentences(words)
+
+    def test_incomplete_selection_extends_to_payoff(self, monkeypatch):
+        import pipeline.boundaries as B
+        words, sents = self._story()
+        clip = {"start_time": 0.0, "end_time": sents[1]["end_time"], "hook": "box"}
+        monkeypatch.setattr(B, "_llm_validate", lambda *a, **k: {
+            "start_id": 0, "end_id": 1, "complete": False, "candidate_complete": False,
+            "missing": "what was inside", "reason": "no reveal"})
+        seen = {}
+
+        def ext(clip, s, e, forward, missing, cfg):
+            seen["forward"] = [x["id"] for x in forward]
+            seen["missing"] = missing
+            return {"start_id": 0, "end_id": 2, "complete": True, "reason": "reveal lands"}
+        monkeypatch.setattr(B, "_llm_extend", ext)
+        refined, action = refine_clip(clip, words, sents, cfg=dict(CFG, llm_validation=True))
+        assert action == "refined"
+        assert 2 in seen["forward"] and seen["missing"] == "what was inside"
+        assert abs(refined["refined_end_time"] - (sents[2]["end_time"] + 0.3)) < 0.05
+        assert refined["refine_reason"].startswith("llm_extended_to_payoff")
+
+    def test_no_payoff_found_rejects(self, monkeypatch):
+        import pipeline.boundaries as B
+        words, sents = self._story()
+        clip = {"start_time": 0.0, "end_time": sents[1]["end_time"], "hook": "box"}
+        monkeypatch.setattr(B, "_llm_validate", lambda *a, **k: {
+            "start_id": 0, "end_id": 1, "complete": False, "missing": "x", "reason": "no reveal"})
+        monkeypatch.setattr(B, "_llm_extend", lambda *a, **k: {
+            "start_id": 0, "end_id": 2, "complete": False, "reason": "never resolves"})
+        refined, action = refine_clip(clip, words, sents, cfg=dict(CFG, llm_validation=True))
+        assert action == "rejected"
+        assert "thought unfinished" in refined["refine_reason"]
+
+    def test_reject_incomplete_can_be_disabled(self, monkeypatch):
+        import pipeline.boundaries as B
+        words, sents = self._story()
+        clip = {"start_time": 0.0, "end_time": sents[1]["end_time"], "hook": "box"}
+        monkeypatch.setattr(B, "_llm_validate", lambda *a, **k: {
+            "start_id": 0, "end_id": 1, "complete": False, "missing": "x", "reason": "r"})
+        monkeypatch.setattr(B, "_llm_extend", lambda *a, **k: None)
+        refined, action = refine_clip(clip, words, sents,
+                                      cfg=dict(CFG, llm_validation=True, reject_incomplete=False))
+        assert action == "refined"
+        assert refined["refine_reason"].startswith("llm_incomplete_kept")
+
+    def test_confirmed_ending_not_cut_back_by_short_cap(self, monkeypatch):
+        # the payoff lands ~20s after the candidate end: beyond the 15s
+        # max_extension, inside max_payoff_extension -> kept, not truncated
+        import pipeline.boundaries as B
+        words, sents = self._story()
+        clip = {"start_time": 0.0, "end_time": sents[1]["end_time"], "hook": "box"}
+        monkeypatch.setattr(B, "_llm_validate", lambda *a, **k: {
+            "start_id": 0, "end_id": 1, "complete": False, "missing": "x", "reason": "r"})
+        monkeypatch.setattr(B, "_llm_extend", lambda *a, **k: {
+            "start_id": 0, "end_id": 2, "complete": True, "reason": "ok"})
+        refined, action = refine_clip(clip, words, sents,
+                                      cfg=dict(CFG, llm_validation=True,
+                                               max_extension_seconds=15,
+                                               max_payoff_extension_seconds=30))
+        assert action == "refined"
+        assert refined["refined_end_time"] > sents[2]["start_time"]
+
+
+class TestStitchedTotalCap:
+    def test_continuation_dropped_when_total_exceeds_cap(self, monkeypatch):
+        import pipeline.boundaries as B
+        from pipeline.boundaries import refine_all_clips
+
+        def fake_refine(clip, words, sents, vd, cfg):
+            s, e = float(clip["start_time"]), float(clip["end_time"])
+            return ({**clip, "refined_start_time": s, "refined_end_time": e,
+                     "refine_status": "refined", "source_ranges": [[s, e]]}, "refined")
+        monkeypatch.setattr(B, "refine_clip", fake_refine)
+        monkeypatch.setattr(B, "load_words", lambda p=None: [])
+        clip = {"clip_number": 1, "start_time": 0.0, "end_time": 70.0,
+                "related_segments": [{"start_time": 75.0, "end_time": 105.0}]}
+        out = refine_all_clips([clip], transcript_path="x",
+                               cfg={"max_total_seconds": 90, "max_stitch_gap_seconds": 45})
+        assert out[0]["source_ranges"] == [[0.0, 70.0]]       # 70 + 30 > 90 -> dropped
+        assert out[0]["output_duration"] <= 90
+
+    def test_merged_total(self):
+        from pipeline.boundaries import _merged_total
+        assert _merged_total([(0, 10), (5, 20), (30, 40)]) == 30

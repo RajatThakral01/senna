@@ -21,6 +21,10 @@ defaults:
   music_volume: 0.3
   fade_duration: 0.5
 
+# ── Runtime ───────────────────────────────────────────────────────────────────
+runtime:
+  keep_awake: true        # macOS: hold an idle-sleep assertion (caffeinate) while a run is in progress
+
 # ── Database ──────────────────────────────────────────────────────────────────
 database:
   host: "localhost"
@@ -109,15 +113,18 @@ fusion:
 
 # ── Transcription (WhisperX + alignment) ───────────────────────────────────────
 transcription:
-  model: "base"          # override via WHISPER_MODEL (e.g. large-v3, turbo)
+  model: "small"         # override via WHISPER_MODEL. Measured on this Mac (CPU, 87s of
+                         # MrBeast audio): base 0.09x realtime but "21,700 galleries"
+                         # (calories) + "spill it" (spell); small 0.16x realtime and both
+                         # right (~9 min per hour of video); medium 0.33x, no better here
   device: "auto"         # auto (CUDA when available, else CPU) | cuda | cpu;
                          # measured 60s sample: cuda 1.5s vs cpu 11.0s
                          # transcribe, identical words (see output/bench_transcription.json)
-  compute_type: "float32"  # override via WHISPER_COMPUTE (float32|float16|int8)
+  compute_type: "auto"   # auto = int8 on CPU, float16 on CUDA | float32 | float16 | int8
   language: "en"         # override via WHISPER_LANGUAGE
   glossary: []           # [{match: "AirPower", replacement: "AirPower"}]
                          # display-text corrections; timings/source kept,
-                         # corrections traceable (see transcripts/glossary.json)
+                         # corrections traceable (see work/<video>/glossary.json)
 
 # ── Captions (phrase-level ASS karaoke) ────────────────────────────────────────
 captions:
@@ -149,6 +156,8 @@ refine:
   start_padding: 0.15         # silence kept before first word
   end_padding: 0.3            # silence kept after last word (fade lives here)
   llm_validation: true        # set false to use deterministic snap only
+  max_payoff_extension_seconds: 30  # an LLM-confirmed payoff may extend the end this far
+  reject_incomplete: true     # drop clips whose thought never resolves (no payoff) instead of keeping them
 
 # ── Vertical framing (full-screen 9:16 crop-only; no letterbox default) ───────
 framing:
@@ -158,23 +167,71 @@ framing:
   work_area: null             # optional DIY fallback ROI {x, y, w, h} in source pixels (9:16)
   content_bounds: null        # optional manual content rect {x, y, w, h}; null = auto-detect embedded bars
   content_bar_threshold: 8    # luma at/below this on all samples = embedded bar; 0 disables detection
-  sample_interval: 0.25       # face-detection sampling, seconds
-  deadzone_ratio: 0.15        # centre zone where the crop does not move
-  smooth_factor: 0.30         # crop catch-up speed per sample
-  jitter_px: 5                # ignore smaller shifts (anti-micro-shake)
-  snap_ratio: 0.25            # jump >25% width = hard cut to new speaker
+  # face detection + tracking
+  face_backend: "auto"        # auto (yunet > mediapipe > haar) | yunet | mediapipe | haar
+  face_confidence: 0.6        # detector score threshold
+  detect_width: 960           # frames downscaled to this width for detection (speed)
+  min_face_ratio: 0.02        # faces narrower than this share of frame width ignored
+  sample_interval: 0.1        # detection sampling, seconds (sequential decode, no seeking)
+  track_max_missing_seconds: 1.5  # a track keeps its identity through dropouts this long
+  min_track_hits: 3           # tracks seen fewer times are false positives (dropped)
+  # virtual camera (planned offline per scene)
+  deadzone_ratio: 0.15        # subject may move this share of the crop before the camera follows
+  median_window: 5            # samples; rejects single-frame detection outliers
+  path_smooth_seconds: 0.45   # Gaussian sigma of the camera path (higher = calmer)
+  max_pan_speed: 0.6          # cap on pan speed, source widths per second
   hold_last_position_seconds: 1.0  # retain last crop during detection loss
-  layout_stability_frames: 6  # consecutive samples before a layout switch
+  interpolation: "cubic"      # crop scaling: linear | cubic | lanczos
+  # shot styling (Phase C)
+  auto_zoom: true             # size each speaker shot by face size (real close-ups)
+  target_face_ratio: 0.33     # face width as a share of output width in close-ups
+  max_upscale: 2.4            # never zoom past this upscale (crop >= 1080/2.4 px wide)
+  emphasis_zoom: 0.06         # punch-in amount on emphatic loud moments; 0 disables
+  emphasis_db: 4.0            # loudness rise over the local median that counts as emphasis
+  emphasis_min_gap: 4.0       # seconds between punch-ins
+  emphasis_hold: 1.2          # seconds a punch-in holds before easing out
+  cut_snap_seconds: 0.4       # speaker cuts move to the quietest point within this window
+  debug_video: false          # side-by-side review videos (or pass --debug-framing)
+  # stacked (two-person) layout
+  stack_min_presence: 0.3     # each person must be visible in this share of a scene
+  stack_min_concurrent: 0.6   # ...and BOTH visible at the same time in this share (no duplicate panels)
+  panel_face_scale: 3.2       # panel crop width = face width x this
+  panel_headroom_ratio: 0.4   # face position from top of each panel
+  layout_stability_frames: 15 # consecutive samples before a layout switch (1.5s at 0.1s)
   min_face_fraction: 0.5      # faces must cover this share of samples or fallback
-  scene_cut_threshold: 18     # frame-diff sensitivity; resets tracking at cuts
+  scene_cut_content: 27.0     # hard cut: HSV change between adjacent frames at least this
+  scene_cut_corr: 0.85        # ...and colour-histogram correlation below this
+  scene_cut_onset: 2.5        # ...and a sudden jump (x previous frame's change); rejects whip pans
+  min_scene_seconds: 0.3      # cuts closer than this are merged
   headroom_ratio: 0.35        # face position from top of crop
   min_zoom: 1.0
   max_zoom: 2.5
   split_divider_px: 6
   branded_background: "#0B0F1A"  # solid fallback colour (no blur)
-  face_confidence: 0.5
   # face_model: "models/blaze_face_short_range.tflite"  # override download path
-  allow_active_speaker_switch: false  # v1: keep false; needs explicit speaker_map
+  # active speaker director (lip motion + audio voicing; layouts auto / speaker_crop)
+  active_speaker: true        # cut to whoever is talking when 2+ people share a scene
+  speaker_min_presence: 0.2   # a person must be visible this share of a scene to get shots
+  speaker_max_people: 4
+  speaker_window_seconds: 0.5 # lip-activity smoothing window
+  speaker_min_activity: 0.08  # below this (p90 lip motion) evidence is ignored -> stacked/subject
+  speaker_voice_db: 10.0      # loudness above noise floor that counts as speech
+  speaker_switch_cost: 3.0    # evidence needed to cut (higher = fewer cuts)
+  min_shot_seconds: 1.6       # shortest shot; brief interjections never cause a cut
+  speaker_allow_group: true   # stacked two-shot while two people talk over each other
+  speaker_group_threshold: 0.5  # second mouth activity (relative) needed for a two-shot
+  speaker_group_bias: 0.2
+  # Phase D: who may be a speaker, crowds, sliced faces
+  speaker_min_face_ratio: 0.045  # faces narrower than this share of frame width never drive speaker picks
+  speaker_min_clear_seconds: 0.3 # a scene needs this much clearly-one-person speech, else no director
+  speaker_prior_weight: 0.1   # pauses / weak evidence lean to the most prominent (big, central) person
+  crowd_min_people: 3         # 3+ visible people and nobody dominant -> frame the group, not one face
+  crowd_dominance: 2.5        # one person this much more prominent than the next is "dominant"
+  crowd_speaker_min_score: 0.25  # in crowds, a close-up on one speaker needs at least this confidence
+  deslice_faces: true         # nudge crops so nearby faces are fully in or fully out
+  deslice_max_shift: 0.25     # max nudge, share of the crop width
+  saliency_fallback: true     # no face (b-roll, products, face lost >1s): crop follows the salient content
+  allow_active_speaker_switch: false  # legacy diarization+speaker_map adapter (pipeline/speakers.py)
   speaker_map: {}             # e.g. {SPEAKER_00: left, SPEAKER_01: right}
 
 # ── Speakers (optional active-speaker adapter; default OFF) ───────────────────
@@ -207,6 +264,7 @@ export:
   crf: 23
   audio_bitrate: "128k"
   fps: null               # null = keep source fps
+  keep_intermediates: false  # true = keep work/<video>/clips/clip_N.mp4 + _vertical.mp4 (~60MB/clip)
 
 # ── Fades (speech fade-out disabled by default) ───────────────────────────────
 fades:

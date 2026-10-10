@@ -33,11 +33,16 @@ from logger import get_logger
 log = get_logger("pipeline.audio_events")
 
 
-def ensure_source_audio(raw_video_path="input/raw_video.mp4",
-                        audio_path="downloads/audio.wav"):
-    """Return path to pre-normalization source audio, extracting if needed."""
+def ensure_source_audio(raw_video_path, audio_path=None):
+    """Return path to pre-normalization source audio, extracting if needed.
+
+    audio_path defaults to the active video workspace (work/<video>/audio.wav).
+    """
     import os
     import subprocess
+    if audio_path is None:
+        from pipeline.workspace import current
+        audio_path = current().audio
     if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
         return audio_path
     from config import ffmpeg_path

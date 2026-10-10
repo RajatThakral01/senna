@@ -25,36 +25,58 @@ class TestInputHandler(unittest.TestCase):
     @patch('input.input_handler._handle_youtube')
     def test_handle_input_youtube(self, mock_download):
         print("Testing handle_input with YouTube URL...")
-        input_handler.handle_input("https://www.youtube.com/watch?v=123")
-        mock_download.assert_called_once_with("https://www.youtube.com/watch?v=123")
+        input_handler.handle_input("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        mock_download.assert_called_once_with("https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                                              os.path.join("downloads", "dQw4w9WgXcQ.mp4"))
         print("✅ YouTube handler called correctly.")
 
     @patch('input.input_handler._handle_youtube_live')
     def test_handle_input_youtube_live(self, mock_download):
         print("Testing handle_input with YouTube Live URL...")
-        input_handler.handle_input("https://www.youtube.com/live/123")
-        mock_download.assert_called_once_with("https://www.youtube.com/live/123")
+        input_handler.handle_input("https://www.youtube.com/live/abcdefghijk")
+        mock_download.assert_called_once_with("https://www.youtube.com/live/abcdefghijk",
+                                              os.path.join("downloads", "abcdefghijk_live.mp4"))
         print("✅ YouTube Live handler called correctly.")
 
     @patch('input.input_handler.download_from_drive')
     def test_handle_input_google_drive(self, mock_download):
         print("Testing handle_input with Google Drive URL...")
         input_handler.handle_input("https://drive.google.com/file/d/123/view")
-        mock_download.assert_called_once_with("https://drive.google.com/file/d/123/view", "input/raw_video.mp4")
+        mock_download.assert_called_once_with("https://drive.google.com/file/d/123/view",
+                                              os.path.join("downloads", "view.mp4"))
         print("✅ Google Drive handler called correctly.")
 
-    @patch('input.input_handler.copy_local_file')
-    def test_handle_input_local_file(self, mock_copy):
-        print("Testing handle_input with local file path...")
-        input_handler.handle_input("/path/to/video.mp4")
-        mock_copy.assert_called_once_with("/path/to/video.mp4", "input/raw_video.mp4")
-        print("✅ Local file handler called correctly.")
+    def test_handle_input_local_file_used_in_place(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+            self.assertEqual(input_handler.handle_input(f.name), f.name)
+        with self.assertRaises(FileNotFoundError):
+            input_handler.handle_input("/path/to/missing_video.mp4")
+
+    def test_relative_existing_path_is_local(self):
+        import tempfile
+        d = tempfile.mkdtemp(dir=".")
+        p = os.path.join(os.path.basename(d), "clip.mp4")
+        open(p, "wb").close()
+        try:
+            self.assertEqual(input_handler.detect_source_type(p), "local_file")
+        finally:
+            os.remove(p); os.rmdir(d)
+
+    @patch('input.input_handler._handle_youtube')
+    @patch('input.input_handler._cached_source_ok', return_value=True)
+    def test_cached_download_reused(self, _ok, mock_download):
+        out = input_handler.handle_input("https://youtu.be/dQw4w9WgXcQ")
+        self.assertEqual(out, os.path.join("downloads", "dQw4w9WgXcQ.mp4"))
+        mock_download.assert_not_called()
 
     @patch('input.input_handler.download_direct_url')
     def test_handle_input_direct_url(self, mock_download):
         print("Testing handle_input with direct URL...")
         input_handler.handle_input("http://example.com/video.mp4")
-        mock_download.assert_called_once_with("http://example.com/video.mp4", "input/raw_video.mp4")
+        args = mock_download.call_args[0]
+        self.assertEqual(args[0], "http://example.com/video.mp4")
+        self.assertTrue(args[1].startswith(os.path.join("downloads", "video_")))
         print("✅ Direct URL handler called correctly.")
 
     def test_handle_input_unknown(self):
@@ -84,6 +106,22 @@ class TestInputHandler(unittest.TestCase):
             # both clients attempted
             self.assertEqual(mock_run.call_count, 2)
         print("✅ SD source fails loudly after both clients.")
+
+    def test_hq_retried_after_failure(self):
+        # audio URL expired after a long video download (HTTP 403):
+        # the same HQ command is retried before dropping to the SD client
+        import subprocess
+        err = subprocess.CalledProcessError(1, ["yt-dlp"])
+        with patch("input.input_handler._run_yt_dlp",
+                   side_effect=[err, None]) as mock_run, \
+             patch("input.input_handler._probe_height", return_value=1080), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.remove"), \
+             patch("os.path.getsize", return_value=1):
+            input_handler._handle_youtube("https://www.youtube.com/watch?v=123")
+            self.assertEqual(mock_run.call_count, 2)
+            self.assertEqual(mock_run.call_args_list[0][0][0],
+                             mock_run.call_args_list[1][0][0])
 
     def test_hd_source_accepted_first_try(self):
         print("Testing HD accept...")

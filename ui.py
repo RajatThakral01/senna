@@ -5,6 +5,7 @@ import io
 import json
 import time
 from logger import get_logger, setup_logging
+from campaign_ui import build_campaign_tabs
 setup_logging()
 log = get_logger("ui")
 from main import (run_pipeline, scan_assets, parse_campaign, load_template,
@@ -69,42 +70,45 @@ def generate_clips_wrapper(video_input, campaign_description, template, layout="
 
 
 with gr.Blocks() as app:
-    gr.Markdown("# 🎬 Viral Clips Automator")
+    gr.Markdown("# 🎬 Viral Clips Automator — campaigns")
+    build_campaign_tabs()
+
+    with gr.Tab("5 · Quick clips (no campaign)"):
     
-    with gr.Row():
-        with gr.Column(scale=2):
-            video_input = gr.Textbox(label="Video Input", placeholder="Enter a YouTube URL, Google Drive link, or local file path...")
-            campaign_description = gr.Textbox(
-                label="Campaign Description", 
-                lines=3,
-                placeholder="e.g. Add logo top right, podcast style, no music"
-            )
-            template_choices = ["None", "podcast_clip", "tiktok_reaction", "motivational_reel"]
-            template = gr.Radio(template_choices, label="Template", value="None")
-            layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "center_crop", "branded_fit"],
-                              label="Vertical layout (auto = face-aware crop; branded_fit only without full-screen mode)",
-                              value="auto")
+        with gr.Row():
+            with gr.Column(scale=2):
+                video_input = gr.Textbox(label="Video Input", placeholder="Enter a YouTube URL, Google Drive link, or local file path...")
+                campaign_description = gr.Textbox(
+                    label="Campaign Description", 
+                    lines=3,
+                    placeholder="e.g. Add logo top right, podcast style, no music"
+                )
+                template_choices = ["None", "podcast_clip", "tiktok_reaction", "motivational_reel"]
+                template = gr.Radio(template_choices, label="Template", value="None")
+                layout = gr.Radio(["auto", "speaker_crop", "stacked_split", "center_crop", "branded_fit"],
+                                  label="Vertical layout (auto = face-aware crop; branded_fit only without full-screen mode)",
+                                  value="auto")
 
-            generate_btn = gr.Button("🚀 Generate Clips", variant="primary")
-            status_box = gr.Textbox(label="Status", value="Ready.", interactive=False)
+                generate_btn = gr.Button("🚀 Generate Clips", variant="primary")
+                status_box = gr.Textbox(label="Status", value="Ready.", interactive=False)
 
-        with gr.Column(scale=3):
-            gr.Markdown("### ⚙️ Parsed Campaign Config")
-            config_preview = gr.Code(label="Config Preview", language="json", value="{}")
+            with gr.Column(scale=3):
+                gr.Markdown("### ⚙️ Parsed Campaign Config")
+                config_preview = gr.Code(label="Config Preview", language="json", value="{}")
 
-    gr.Markdown("---")
-    gr.Markdown("### 🎥 Output Clips")
-    gallery = gr.Gallery(label="Generated Clips", show_label=False, elem_id="gallery", columns=4, height="auto")
+        gr.Markdown("---")
+        gr.Markdown("### 🎥 Output Clips")
+        gallery = gr.Gallery(label="Generated Clips", show_label=False, elem_id="gallery", columns=4, height="auto")
 
-    generate_btn.click(
-        fn=generate_clips_wrapper,
-        inputs=[video_input, campaign_description, template, layout],
-        outputs=[status_box, config_preview, gallery, status_box],
-        concurrency_limit=1
-    )
+        generate_btn.click(
+            fn=generate_clips_wrapper,
+            inputs=[video_input, campaign_description, template, layout],
+            outputs=[status_box, config_preview, gallery, status_box],
+            concurrency_limit=1
+        )
 
     # ── Review & Correct tab ──────────────────────────────────────────
-    with gr.Tab("Review & Correct"):
+    with gr.Tab("6 · Clip review"):
         gr.Markdown("### Ranked candidates, boundary/layout/caption fixes, selective re-render")
         with gr.Row():
             with gr.Column(scale=1):
@@ -263,4 +267,11 @@ with gr.Blocks() as app:
                            outputs=[rev_status, rev_preview])
 
 if __name__ == "__main__":
+    try:
+        from campaign.jobs import resume_interrupted
+        resumed = resume_interrupted()          # jobs cut off by a restart
+        if resumed:
+            log.info("re-queued %d interrupted campaign job(s)", len(resumed))
+    except Exception:
+        log.exception("could not resume interrupted jobs")
     app.launch(share=False, server_port=7862, theme=gr.themes.Soft())

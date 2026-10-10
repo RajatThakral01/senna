@@ -1,7 +1,7 @@
 """preview_framing.py — render short layout previews + boundary demo (verification only).
 
-Writes to output/previews/ (never touches existing finals).
-Usage: .venv/Scripts/python.exe preview_framing.py
+Writes to output/<video>/previews/ (never touches existing finals).
+Usage: python preview_framing.py <video_id>
 """
 import json
 import os
@@ -14,8 +14,16 @@ from config import ffmpeg_path
 from pipeline.framing import sample_clip, decide_layout, render_vertical
 from pipeline.boundaries import load_words, build_sentences, refine_clip
 
-SRC = "input/raw_video.mp4"
-OUTDIR = os.path.join("output", "previews")
+from db.repositories import video_repo
+from pipeline import workspace
+
+if len(sys.argv) < 2:
+    raise SystemExit("usage: python preview_framing.py <video_id>")
+_ws = workspace.activate(sys.argv[1])
+SRC = (video_repo.get_video(sys.argv[1]) or {}).get("raw_path")
+if not SRC or not os.path.exists(SRC):
+    raise SystemExit(f"source video not found for {sys.argv[1]}: {SRC!r}")
+OUTDIR = os.path.join(_ws.output_dir, "previews")
 os.makedirs(OUTDIR, exist_ok=True)
 
 # 8s demo window inside clip_1's range (30-55s per report.json)
@@ -40,7 +48,7 @@ for layout in ("auto", "speaker_crop", "stacked_split", "branded_fit"):
     print(f"{layout}: {res['layout']} | {res['layout_reason'][:90]} | frames={res['frames']}")
 
 # boundary demo: candidate ending mid-sentence from the real transcript
-words = load_words("transcripts/transcript.json")
+words = load_words(_ws.transcript)
 sents = build_sentences(words)
 print(f"transcript words={len(words)} sentences={len(sents)}")
 # find a sentence longer than 4s starting after 30s, cut candidate mid-next-sentence

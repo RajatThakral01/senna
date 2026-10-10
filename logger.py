@@ -110,6 +110,30 @@ def setup_logging(level=None, log_file=None, to_console=True, force=False):
     _log_level = level
 
 
+@contextmanager
+def run_log(label, log_dir="logs/runs"):
+    """Also write everything logged inside the block to its own file.
+
+    logs/runs/<YYYYmmdd-HHMMSS>_<label>.log — one file per pipeline run, so
+    a later run never overwrites (and the 5MB rotating main log never drops)
+    an earlier run's history. Yields the file path.
+    """
+    if not _configured:
+        setup_logging()
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, f"{time.strftime('%Y%m%d-%H%M%S')}_{label}.log")
+    root = logging.getLogger()
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setLevel(root.level)
+    fh.setFormatter(_CtxFormatter(_FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
+    root.addHandler(fh)
+    try:
+        yield path
+    finally:
+        root.removeHandler(fh)
+        fh.close()
+
+
 def get_logger(name):
     """Return a module logger, ensuring logging is configured."""
     if not _configured:

@@ -45,8 +45,14 @@ SENTENCE_END_RE = re.compile(r"[.!?…]+$")
 FILLER_ONLY_RE = re.compile(r"^(so|and|well|you know|um|uh|like)[,.\s]*$", re.IGNORECASE)
 
 
-def load_words(transcript_path="transcripts/transcript.json"):
-    """Return flat [{word, start, end}] list. Handles missing data gracefully."""
+def load_words(transcript_path=None):
+    """Return flat [{word, start, end}] list. Handles missing data gracefully.
+
+    transcript_path defaults to the active video workspace's transcript.
+    """
+    if transcript_path is None:
+        from pipeline.workspace import current
+        transcript_path = current().transcript
     with open(transcript_path, encoding="utf-8") as f:
         raw = json.load(f)
     words = []
@@ -181,50 +187,23 @@ def snap_range(start, end, words, sentences, cfg):
     return ns, ne, info
 
 
-def _llm_validate(clip, sentences_in_window, cfg):
-    """Ask the LLM to select start/end sentence IDs + completeness verdict.
-
-    Returns dict {start_id, end_id, complete, reason} or None on any failure
-    (missing key, timeout, bad JSON) — caller falls back to deterministic.
-    Timestamps are NEVER taken from the LLM, only IDs.
-    """
+def _boundary_llm(prompt, cfg, purpose="boundaries"):
+    """One boundary LLM call -> parsed verdict dict, or None on any failure."""
     try:
-        from config import LLM_API_KEY, LLM_API_URL, LLM_MODEL
+        from config import LLM_MODEL
     except Exception:
         return None
     from pipeline.llm_client import pool_usable as _pool_usable
     if not _pool_usable():
         log.debug("boundaries LLM skipped (no key)")
         return None
-    if not cfg.get("llm_validation", True):
-        return None
-
-    context_lines = []
-    for s in sentences_in_window:
-        flag = "complete?" if not s["ends_with_punctuation"] else "punct"
-        context_lines.append(f'[{s["id"]}] ({s["start_time"]:.1f}-{s["end_time"]:.1f}s, {flag}) {s["text"]}')
-    context = "\n".join(context_lines)
-    prompt = (
-        "You are a video editor checking whether a short clip ends mid-thought.\n"
-        f'Candidate clip: {clip.get("start_time")}s -> {clip.get("end_time")}s. '
-        f'Hook: {clip.get("hook", "")}\n'
-        "Sentences with [ID] (times are exact, from word timestamps):\n"
-        f"{context}\n\n"
-        "Decide: does the candidate complete its main thought, explanation or punchline? "
-        "Punctuation alone is not enough — a complete sentence can still leave the thought unfinished "
-        '(e.g. ends with "because..." setup, unanswered question, missing payoff).\n'
-        "Select the best start sentence ID (a natural hook beginning, not filler) "
-        "and end sentence ID (a thought-complete ending) using ONLY IDs above.\n"
-        'Respond with ONLY JSON: {"start_id": <int>, "end_id": <int>, '
-        '"complete": <true|false>, "reason": "<short reason>"}'
-    )
     try:
         from pipeline.llm_client import post_chat, SLOT_FOR_STAGE
         r = post_chat({"model": LLM_MODEL, "temperature": 0.1,
-                       "max_tokens": 400,
+                       "max_tokens": 500,
                        "messages": [{"role": "user", "content": prompt}]},
                       timeout=60, slot=SLOT_FOR_STAGE["boundaries"],
-                      purpose="boundaries")
+                      purpose=purpose, json_mode=True)
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()
@@ -232,12 +211,84 @@ def _llm_validate(clip, sentences_in_window, cfg):
         if not m:
             return None
         data = json.loads(m.group(0))
+        # selection_complete = does [start_id..end_id] finish the thought.
+        # Older single-field answers ("complete") are read the same way.
+        sel = data.get("selection_complete", data.get("complete", True))
         return {"start_id": int(data["start_id"]), "end_id": int(data["end_id"]),
-                "complete": bool(data.get("complete", True)),
+                "complete": bool(sel),
+                "candidate_complete": bool(data.get("candidate_complete", sel)),
+                "missing": str(data.get("missing", "") or "")[:200],
                 "reason": str(data.get("reason", ""))[:300]}
     except Exception:
-        log.exception("boundaries LLM validation failed, deterministic fallback")
+        log.exception("%s LLM call failed, deterministic fallback", purpose)
         return None
+
+
+def _sentence_lines(sentences):
+    out = []
+    for s in sentences:
+        flag = "complete?" if not s["ends_with_punctuation"] else "punct"
+        out.append(f'[{s["id"]}] ({s["start_time"]:.1f}-{s["end_time"]:.1f}s, {flag}) {s["text"]}')
+    return "\n".join(out)
+
+
+_VERDICT_SCHEMA = ('Respond with ONLY JSON: {"start_id": <int>, "end_id": <int>, '
+                   '"candidate_complete": <true|false>, "selection_complete": <true|false>, '
+                   '"missing": "<what is still missing if selection_complete is false>", '
+                   '"reason": "<short reason>"}')
+
+
+def _llm_validate(clip, sentences_in_window, cfg):
+    """Ask the LLM for start/end sentence IDs + completeness of THAT selection.
+
+    Returns {start_id, end_id, complete, candidate_complete, missing, reason}
+    or None on any failure (missing key, timeout, bad JSON) — caller falls
+    back to deterministic. Timestamps are NEVER taken from the LLM, only IDs.
+
+    The verdict used for decisions is `complete` = whether the SELECTED range
+    finishes the thought. The old prompt only asked about the original
+    candidate, so "incomplete" was ambiguous: the code then walked back from
+    an ending the model had already fixed, or kept an unfinished one.
+    """
+    if not cfg.get("llm_validation", True):
+        return None
+    prompt = (
+        "You are a video editor fixing the boundaries of a short clip.\n"
+        f'Candidate clip: {clip.get("start_time")}s -> {clip.get("end_time")}s. '
+        f'Hook: {clip.get("hook", "")}\n'
+        "Sentences with [ID] (times are exact, from word timestamps):\n"
+        f"{_sentence_lines(sentences_in_window)}\n\n"
+        "1. Does the candidate as given complete its main thought, explanation or punchline? "
+        "Punctuation alone is not enough — a complete sentence can still leave the thought "
+        'unfinished (e.g. a "because..." setup, an unanswered question, a missing payoff).\n'
+        "2. Select the best start sentence ID (a natural hook beginning, not filler) and the end "
+        "sentence ID AFTER which the payoff has landed, using ONLY IDs above. Extend past the "
+        "candidate end when the payoff comes later.\n"
+        "3. selection_complete: does YOUR selected start..end range finish the thought?\n"
+        + _VERDICT_SCHEMA
+    )
+    return _boundary_llm(prompt, cfg)
+
+
+def _llm_extend(clip, start_sent, end_sent, forward, missing, cfg):
+    """Second pass: find where the payoff lands in the sentences AFTER end_sent.
+
+    forward: sentences from start_sent onward (wider than the first window).
+    Returns the same verdict shape, or None.
+    """
+    prompt = (
+        "You are a video editor. A short clip ends before its payoff.\n"
+        f'Hook: {clip.get("hook", "")}\n'
+        f'It currently runs from sentence [{start_sent["id"]}] to [{end_sent["id"]}], '
+        f'and this is still missing: {missing or "the payoff / conclusion"}.\n'
+        "Sentences from the clip start onward, with [ID]:\n"
+        f"{_sentence_lines(forward)}\n\n"
+        f'Keep start_id = {start_sent["id"]}. Choose the end_id AFTER which the payoff, answer '
+        "or punchline has landed, as early as possible, using ONLY IDs above. If the thought "
+        "never resolves within these sentences, set selection_complete to false.\n"
+        + _VERDICT_SCHEMA
+    )
+    return _boundary_llm(prompt, cfg, purpose="boundaries-extend")
 
 
 def refine_clip(clip, words, sentences, video_duration=None, cfg=None):
@@ -284,14 +335,43 @@ def refine_clip(clip, words, sentences, video_duration=None, cfg=None):
 
     det_start, det_end, det_info = snap_range(orig_start, orig_end, words, sentences, cfg)
 
+    payoff_ext = float(cfg.get("max_payoff_extension_seconds", 30))
     verdict = _llm_validate({"start_time": orig_start, "end_time": orig_end,
                              "hook": clip.get("hook", "")}, window, cfg)
     valid_ids = {s["id"] for s in window}
+    llm_checked_end = False
     if verdict and verdict["start_id"] in valid_ids and verdict["end_id"] in valid_ids:
-        by_id = {s["id"]: s for s in window}
+        by_id = {s["id"]: s for s in sentences}
         s_sel, e_sel = by_id[verdict["start_id"]], by_id[verdict["end_id"]]
         if e_sel["id"] < s_sel["id"]:
             s_sel, e_sel = e_sel, s_sel
+        method = "llm_validated"
+        reason = verdict.get("reason", "")
+        if verdict["complete"]:
+            llm_checked_end = True
+        else:
+            # The selected range still ends before the payoff: look further
+            # ahead (first window only reaches context_seconds past the end).
+            forward = [s for s in sentences if s["id"] >= s_sel["id"]
+                       and s["start_time"] <= orig_end + payoff_ext]
+            ext = _llm_extend(clip, s_sel, e_sel, forward, verdict.get("missing", ""), cfg)
+            fwd_ids = {s["id"] for s in forward}
+            if (ext and ext["complete"] and ext["end_id"] in fwd_ids
+                    and ext["end_id"] >= e_sel["id"]):
+                e_sel = by_id[ext["end_id"]]
+                method = "llm_extended_to_payoff"
+                reason = f'{reason} | extended to [{e_sel["id"]}]: {ext.get("reason", "")}'
+                llm_checked_end = True
+            elif cfg.get("reject_incomplete", True):
+                r = dict(clip)
+                r.update({"refine_status": "rejected",
+                          "refine_reason": ("thought unfinished within "
+                                            f"{payoff_ext:.0f}s: {reason}")[:500],
+                          "refined_start_time": orig_start, "refined_end_time": orig_end,
+                          "source_ranges": [[orig_start, orig_end]]})
+                return r, "rejected"
+            else:
+                method = "llm_incomplete_kept"
         llm_start = s_sel["start_time"] - pad_b
         llm_end = e_sel["end_time"] + pad_a
         # Bound by neighbouring speech + video.
@@ -303,33 +383,18 @@ def refine_clip(clip, words, sentences, video_duration=None, cfg=None):
         if video_duration:
             llm_end = min(llm_end, float(video_duration))
             llm_start = max(0.0, min(llm_start, float(video_duration) - 0.5))
-        method = "llm_validated"
-        # If the LLM itself says the thought is incomplete within limits,
-        # prefer an earlier complete ending: walk back to the last
-        # punctuation-ended sentence at/before the selected end.
-        if not verdict["complete"]:
-            earlier = [s for s in window
-                       if s["id"] <= e_sel["id"] and s["ends_with_punctuation"]
-                       and s["start_time"] >= llm_start]
-            if earlier and earlier[-1]["id"] != e_sel["id"]:
-                e_sel = earlier[-1]
-                llm_end = e_sel["end_time"] + pad_a
-                if e_sel["end_word"] + 1 < len(words):
-                    llm_end = min(llm_end, words[e_sel["end_word"] + 1]["start"] - 0.01)
-                method = "llm_earlier_complete_ending"
-                verdict = dict(verdict, reason=(verdict.get("reason", "")
-                                                + " | fell back to earlier complete ending"))
-            else:
-                # No complete ending: reject only if deterministic is also bad;
-                # else keep deterministic snap below.
-                pass
         new_start, new_end = llm_start, max(llm_end, llm_start + 0.5)
-        info = {"method": method, "llm_reason": verdict.get("reason", ""),
+        info = {"method": method, "llm_reason": reason,
                 "start_sentence_id": s_sel["id"], "end_sentence_id": e_sel["id"],
-                "llm_complete": verdict["complete"]}
+                "llm_complete": llm_checked_end}
     else:
         new_start, new_end, info = det_start, det_end, dict(det_info)
         info["llm_reason"] = "llm_unavailable_or_invalid; deterministic snap used"
+
+    # An ending the LLM confirmed lands the payoff may extend up to
+    # max_payoff_extension_seconds; unverified endings keep the tighter cap.
+    if llm_checked_end:
+        max_ext = max(max_ext, payoff_ext)
 
     # Enforce extension + duration limits WITHOUT truncating a sentence.
     if new_end - orig_end > max_ext:
@@ -388,7 +453,20 @@ def refine_clip(clip, words, sentences, video_duration=None, cfg=None):
     return r, "refined"
 
 
-def refine_all_clips(clips, transcript_path="transcripts/transcript.json",
+def _merged_total(ranges):
+    """Total seconds covered by ranges after merging overlaps/touching ones."""
+    total, cur = 0.0, None
+    for a, b in sorted(ranges):
+        if cur is None or a > cur[1] + 0.05:
+            if cur is not None:
+                total += cur[1] - cur[0]
+            cur = [a, b]
+        else:
+            cur[1] = max(cur[1], b)
+    return total + ((cur[1] - cur[0]) if cur else 0.0)
+
+
+def refine_all_clips(clips, transcript_path=None,
                      video_duration=None, cfg=None):
     """Refine every clip; stitched continuations get their own refined ranges.
 
@@ -435,6 +513,11 @@ def refine_all_clips(clips, transcript_path="transcripts/transcript.json",
             except Exception:
                 log.debug("stitch limits skipped", exc_info=True)
         ranges = [tuple(refined["source_ranges"][0])]
+        # the whole stitched clip must respect the total cap; refinement can
+        # extend each part (payoff extension), so re-check after every part
+        max_total = float(cfg.get("max_total_seconds")
+                          or (cfg.get("similarity") or {}).get("max_total_seconds")
+                          or cfg.get("max_duration", 90))
         # refine each confirmed continuation independently
         for seg in segs:
             try:
@@ -447,7 +530,12 @@ def refine_all_clips(clips, transcript_path="transcripts/transcript.json",
                 log.info("clip %s continuation %.1f-%.1f dropped: %s",
                          clip.get("clip_number"), s0, s1, rr.get("refine_reason"))
                 continue
-            ranges.append((rr["refined_start_time"], rr["refined_end_time"]))
+            cand = (rr["refined_start_time"], rr["refined_end_time"])
+            if _merged_total(ranges + [cand]) > max_total + 0.5:
+                log.info("clip %s continuation %.1f-%.1f dropped: total would exceed %.0fs",
+                         clip.get("clip_number"), cand[0], cand[1], max_total)
+                continue
+            ranges.append(cand)
         # merge overlaps, sort
         ranges = sorted(ranges)
         merged = []

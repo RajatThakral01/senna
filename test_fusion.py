@@ -185,3 +185,16 @@ class TestNoneHookReport:
                             "fusion": {"min_score": 0.0}})
         assert isinstance(report["merged"], list)
         assert isinstance(report["skipped"], list)
+
+
+class TestDedupIgnoresRejected:
+    def test_rejected_clip_is_not_the_original(self):
+        from pipeline.fusion import deduplicate_refined
+        rejected = {"clip_number": 2, "refine_status": "rejected",
+                    "source_ranges": [[40.0, 100.0]], "provenance": {"fusion_score": 0.9},
+                    "hook": "a", "reason": "a"}
+        inside = {"clip_number": 6, "refine_status": "refined",
+                  "source_ranges": [[60.0, 89.0]], "provenance": {"fusion_score": 0.6},
+                  "hook": "b", "reason": "b"}
+        kept, dropped = deduplicate_refined([rejected, inside])
+        assert dropped == [] and kept == [inside]

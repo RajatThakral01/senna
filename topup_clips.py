@@ -32,9 +32,11 @@ def main():
     config = get_config()
     video = video_repo.get_video(video_id)
     assert video, f"unknown video {video_id}"
+    from pipeline import workspace
+    ws = workspace.activate(video_id)
     target = int(config.get("discovery", {}).get("target_clips", 15) or 15)
 
-    words = load_words("transcripts/transcript.json")
+    words = load_words(ws.transcript)
     sentences = build_sentences(words)
     chunks = chunk_repo.get_chunks_for_video(video_id)
     existing = clip_repo.get_clips_for_video(video_id)
@@ -86,9 +88,9 @@ def main():
         for c in clips:
             c["related_segments"] = confirmed.get(c["id"], [])
         refined = refine_all_clips(
-            clips, transcript_path="transcripts/transcript.json",
+            clips, transcript_path=ws.transcript,
             video_duration=get_video_duration(
-                video.get("raw_path") or "input/raw_video.mp4"),
+                video["raw_path"]),
             cfg={**config, **config.get("refine", {})})
         kept, dropped = deduplicate_refined(refined)
         for dc, why in dropped:

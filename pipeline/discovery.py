@@ -81,7 +81,7 @@ def _llm_discover(prompt, cfg):
                        "max_tokens": 3000,
                        "messages": [{"role": "user", "content": prompt}]},
                       timeout=180, slot=SLOT_FOR_STAGE["discovery"],
-                      purpose="discovery")
+                      purpose="discovery", json_mode=True)
         raw = r.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         raw = re.sub(r"```json|```", "", raw).strip()
