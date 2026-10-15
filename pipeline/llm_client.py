@@ -1,7 +1,23 @@
 """
 pipeline/llm_client.py
 
-Central Groq chat-completions caller with usage-based key slots + fallback.
+Central LLM caller: Claude (Anthropic) primary, Groq fallback.
+
+Provider order per call (post_chat):
+  1. Claude, when ANTHROPIC_API_KEY is set and LLM_PROVIDER != "groq".
+     Purposes in CLAUDE_SONNET_STAGES (default discovery, analyzer) go to
+     Sonnet 5.5; every other call goes to Haiku 5.5. The OpenAI-style payload
+     is translated to the Messages API and the reply is wrapped back into the
+     chat-completions shape, so callers keep reading
+     r.json()["choices"][0]["message"]["content"] unchanged.
+  2. Groq (below), when Claude fails: network error, 5xx/overloaded, 429
+     after the SDK's own retries, auth error, refusal, or empty reply.
+     A connection/5xx/overload failure also opens a short circuit-breaker
+     (CLAUDE_COOLDOWN_SECONDS, default 60) so a Claude outage doesn't add
+     retry latency to every call; an auth failure disables Claude for the
+     rest of the process.
+
+Groq chat-completions caller with usage-based key slots + fallback.
 
 Workload split (measured on a 58-min video, ~170K LLM tokens/run;
 gpt-oss-120b free tier = 200K TPD / 8K TPM per key):
@@ -59,14 +75,40 @@ _PLACEHOLDERS = {
 }
 
 
+_CLAUDE_PLACEHOLDERS = {"", "your_anthropic_api_key_here"}
+
+# Claude circuit-breaker: skip Claude until this time.time() after an outage.
+_claude_down_until = 0.0
+_claude_clients = {}
+
+
 def has_keys():
     """True when at least one key slot is non-empty."""
     return bool(key_pool())
 
 
+def claude_configured():
+    """True when Claude should be tried first (key set, provider not forced to groq)."""
+    from config import ANTHROPIC_API_KEY, LLM_PROVIDER
+    if os.getenv("LLM_PROVIDER", LLM_PROVIDER).strip().lower() == "groq":
+        return False
+    return os.getenv("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) not in _CLAUDE_PLACEHOLDERS
+
+
 def pool_usable():
-    """True when at least one slot holds a non-placeholder key."""
-    return any(k not in _PLACEHOLDERS for _, k in key_pool())
+    """True when any LLM is callable: Claude key, or a non-placeholder Groq key."""
+    return claude_configured() or any(k not in _PLACEHOLDERS for _, k in key_pool())
+
+
+def claude_model_for(purpose):
+    """Sonnet for the configured high-value purposes, Haiku for the rest."""
+    from config import (CLAUDE_SONNET_MODEL, CLAUDE_HAIKU_MODEL,
+                        CLAUDE_SONNET_STAGES)
+    stages = {x.strip() for x in os.getenv(
+        "CLAUDE_SONNET_STAGES", CLAUDE_SONNET_STAGES).split(",") if x.strip()}
+    if purpose in stages:
+        return os.getenv("CLAUDE_SONNET_MODEL", CLAUDE_SONNET_MODEL)
+    return os.getenv("CLAUDE_HAIKU_MODEL", CLAUDE_HAIKU_MODEL)
 
 
 def key_pool():
@@ -165,8 +207,8 @@ def _is_json_mode_rejection(r):
         or "json" in str(err.get("message", "")).lower())
 
 
-def post_chat(payload, timeout, slot, purpose="llm", json_mode=False):
-    """POST one chat-completions call, rotating keys on failure.
+def _post_groq(payload, timeout, slot, purpose="llm", json_mode=False):
+    """POST one Groq chat-completions call, rotating keys on failure.
 
     Returns the requests.Response on the first 2xx. Raises the last
     HTTPError when every key fails (429 everywhere included), or
@@ -268,3 +310,159 @@ def post_chat(payload, timeout, slot, purpose="llm", json_mode=False):
                 continue
         raise last
 
+
+
+# ── Claude (primary) ─────────────────────────────────────────────────────────
+
+class ClaudeChatResponse:
+    """Minimal requests.Response stand-in carrying a chat-completions body.
+
+    Callers only use .json()["choices"][0]["message"]["content"]; status_code,
+    text and raise_for_status() are provided for code that inspects them.
+    """
+
+    status_code = 200
+
+    def __init__(self, content, finish_reason, model, usage):
+        self._body = {
+            "model": model,
+            "choices": [{"index": 0, "finish_reason": finish_reason,
+                         "message": {"role": "assistant", "content": content}}],
+            "usage": usage,
+        }
+        self.headers = {}
+
+    def json(self):
+        return self._body
+
+    @property
+    def text(self):
+        import json as _json
+        return _json.dumps(self._body)
+
+    def raise_for_status(self):
+        return None
+
+
+_JSON_INSTRUCTION = ("Respond with a single valid JSON object only: no prose, "
+                     "no markdown, no code fences.")
+
+
+def _claude_client(timeout):
+    import anthropic
+    from config import ANTHROPIC_API_KEY
+    key = os.getenv("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY)
+    retries = int(os.getenv("CLAUDE_MAX_RETRIES", "2"))
+    ck = (key, retries)
+    if ck not in _claude_clients:
+        _claude_clients[ck] = anthropic.Anthropic(api_key=key, max_retries=retries)
+    return _claude_clients[ck].with_options(timeout=float(timeout))
+
+
+def _to_claude_request(payload, json_mode, model):
+    """OpenAI chat payload -> Messages API kwargs.
+
+    temperature is dropped: Sonnet 5.5 / Haiku 5.5 reject non-default
+    sampling values. Adaptive thinking spends from max_tokens, and call
+    sites size max_tokens for the ANSWER, so CLAUDE_THINKING_HEADROOM
+    (default 4000) is added on top.
+    """
+    system_parts, messages = [], []
+    for m in payload.get("messages") or []:
+        if m.get("role") == "system":
+            system_parts.append(str(m.get("content") or ""))
+        else:
+            messages.append({"role": m.get("role", "user"),
+                             "content": m.get("content") or ""})
+    if json_mode:
+        system_parts.append(_JSON_INSTRUCTION)
+    answer_tokens = int(payload.get("max_tokens") or 1024)
+    req = {
+        "model": model,
+        "max_tokens": answer_tokens + int(os.getenv("CLAUDE_THINKING_HEADROOM", "4000")),
+        "messages": messages,
+        "thinking": {"type": "adaptive"},
+    }
+    if system_parts:
+        req["system"] = "\n\n".join(system_parts)
+    return req
+
+
+def _claude_effort(model):
+    from config import CLAUDE_SONNET_MODEL
+    if model == os.getenv("CLAUDE_SONNET_MODEL", CLAUDE_SONNET_MODEL):
+        return os.getenv("CLAUDE_SONNET_EFFORT", "medium")
+    return os.getenv("CLAUDE_HAIKU_EFFORT", "medium")
+
+
+def _post_claude(payload, timeout, purpose, json_mode):
+    """One Claude call. Returns ClaudeChatResponse; raises on any failure."""
+    from config import CLAUDE_SONNET_MODEL
+    model = claude_model_for(purpose)
+    req = _to_claude_request(payload, json_mode, model)
+    req["output_config"] = {"effort": _claude_effort(model)}
+    client = _claude_client(timeout)
+    if model == os.getenv("CLAUDE_SONNET_MODEL", CLAUDE_SONNET_MODEL):
+        # Server-side refusal fallback: a safety-classifier decline is
+        # re-run on a fallback model inside the same call.
+        msg = client.beta.messages.create(
+            betas=["server-side-fallback-2026-07-01"], fallbacks="default", **req)
+    else:
+        msg = client.messages.create(**req)
+
+    if msg.stop_reason == "refusal":
+        cat = getattr(getattr(msg, "stop_details", None), "category", None)
+        raise RuntimeError(f"Claude refusal (category={cat})")
+    text = "".join(b.text for b in msg.content if b.type == "text").strip()
+    if not text:
+        raise RuntimeError(f"Claude returned no text (stop_reason={msg.stop_reason})")
+    finish = "length" if msg.stop_reason == "max_tokens" else "stop"
+    if finish == "length":
+        log.warning("%s Claude response truncated at max_tokens=%s",
+                    purpose, req["max_tokens"])
+    u = msg.usage
+    usage = {"prompt_tokens": u.input_tokens, "completion_tokens": u.output_tokens,
+             "total_tokens": u.input_tokens + u.output_tokens}
+    log.debug("%s served by %s (in=%d out=%d)", purpose, msg.model,
+              u.input_tokens, u.output_tokens)
+    return ClaudeChatResponse(text, finish, msg.model, usage)
+
+
+def _note_claude_failure(e, purpose):
+    """Log a Claude failure and open the circuit-breaker when Claude looks down."""
+    global _claude_down_until
+    import anthropic
+    if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        log.error("%s Claude auth failed (%s); using Groq for the rest of this run",
+                  purpose, type(e).__name__)
+        _claude_down_until = float("inf")
+    elif isinstance(e, (anthropic.APIConnectionError, anthropic.InternalServerError,
+                        anthropic.RateLimitError)) or (
+            isinstance(e, anthropic.APIStatusError) and e.status_code >= 500):
+        cool = float(os.getenv("CLAUDE_COOLDOWN_SECONDS", "60"))
+        log.warning("%s Claude unavailable (%s); falling back to Groq for %.0fs",
+                    purpose, type(e).__name__, cool)
+        _claude_down_until = time.time() + cool
+    else:
+        log.warning("%s Claude call failed (%s: %s); falling back to Groq",
+                    purpose, type(e).__name__, e)
+
+
+def post_chat(payload, timeout, slot, purpose="llm", json_mode=False):
+    """One chat call: Claude first (if configured), Groq as fallback.
+
+    Returns an object exposing .json() in chat-completions shape (a
+    ClaudeChatResponse or a Groq requests.Response). When Claude fails and no
+    Groq keys exist, raises requests ConnectionError so existing callers'
+    offline/mock paths still apply.
+    """
+    if claude_configured() and time.time() >= _claude_down_until:
+        try:
+            return _post_claude(payload, timeout, purpose, json_mode)
+        except Exception as e:
+            _note_claude_failure(e, purpose)
+            if not key_pool():
+                raise requests.exceptions.ConnectionError(
+                    f"Claude failed ({type(e).__name__}) and no GROQ_API_KEYs "
+                    "configured for fallback") from e
+    return _post_groq(payload, timeout, slot, purpose, json_mode)

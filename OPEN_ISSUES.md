@@ -122,11 +122,15 @@ Not on the roadmap: 2.3 (provider switch planned — small change in `llm_client
   clip was extended). On full videos this should be fine, but watch the clip count; there is
   no top-up after refinement rejects clips (`topup_clips.py` is manual).
 
-### 2.3 Free-tier Groq limits — KNOWN (moving providers later)
-- 8,000 tokens/min per key ≈ 1 big call per key per minute. Handled by waiting
-  (`LLM_RATE_LIMIT_MAX_WAIT`, default 300s) but LLM stages are slow. When switching
-  providers: `pipeline/llm_client.py` is OpenAI-compatible; review `_is_reasoning_model`
-  (reasoning headroom) and JSON mode support for the new model.
+### 2.3 Free-tier Groq limits — MITIGATED (Claude is now primary, 15 Oct 2026)
+- Claude (Sonnet 5.5 for discovery/analyzer, Haiku 5.5 elsewhere) serves every call when
+  `ANTHROPIC_API_KEY` is set; Groq's 8,000 tokens/min/key limit only matters while Claude is
+  down and calls fall back. Not yet measured on a real video: Claude latency/cost per run,
+  JSON reliability of Haiku at effort `medium`, and whether `outline.max_windows` should rise now
+  that rate limits are gone (see 2.4).
+- Outline cache fingerprint (`analyzer.py`) still keys on `LLM_MODEL` (the Groq model), so an
+  outline cached under Groq is reused after switching to Claude. Clear the workspace's outline
+  cache to force a Claude-made outline.
 
 ### 2.4 Outline windows widen on long videos — LOW
 - `outline.max_windows: 12` → a 58-min video got ~120 sentences per window (designed for

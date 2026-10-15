@@ -3,6 +3,7 @@ whisperx
 librosa
 numpy
 requests
+anthropic==1.14.0
 gdown
 gradio
 pyyaml

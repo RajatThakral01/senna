@@ -116,3 +116,7 @@ ehthumbs.db
 
 # --- Campaign asset libraries (per-campaign uploads, runtime) ---
 assets/campaigns/
+
+# --- Docker runtime ---
+cache/
+media/*

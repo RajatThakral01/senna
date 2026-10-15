@@ -108,7 +108,7 @@ logs/runs/<date-time>_<source>.log       a log file for every run
 
 Two kinds of “AI” are used:
 1. **Local AI:** WhisperX (speech→text), Qwen3 embeddings (text→numbers) and the face / speaker / saliency detection for framing run on your machine. No internet needed after model download, no embedding bills.
-2. **Cloud AI (Groq):** `openai/gpt-oss-120b` for understanding text — campaign parsing, finding clip candidates, checking boundaries, classifying continuations. Needs `GROQ_API_KEY` (+ `_2`, `_3`, `_FALLBACK` — stages are split across keys with automatic fallback).
+2. **Cloud AI (Claude, Groq fallback):** Claude Sonnet 5.5 picks clip candidates (discovery/analyzer); Claude Haiku 5.5 does every other LLM job. Needs `ANTHROPIC_API_KEY`. If Claude is down, the same call goes to Groq `openai/gpt-oss-120b` — campaign parsing, finding clip candidates, checking boundaries, classifying continuations. Needs `GROQ_API_KEY` (+ `_2`, `_3`, `_FALLBACK` — stages are split across keys with automatic fallback).
 
 One database (PostgreSQL, in Docker) glues everything together. One video tool (FFmpeg, plus OpenCV for faces, speakers and saliency) does all video work.
 
@@ -121,7 +121,7 @@ One database (PostgreSQL, in Docker) glues everything together. One video tool (
 | Language | **Python 3.10+** | Whole project |
 | Video download | **yt-dlp** (+ Node for HD), `gdown`, `requests` | YouTube (H.264 ≤1080p, HD required) / Drive / direct URL; downloads cached |
 | Speech-to-text | **WhisperX** `small` + `librosa` | Word-level timestamps (`start`, `end` per word) |
-| LLM (brain) | **Groq** `openai/gpt-oss-120b` via OpenAI-compatible API | Campaigns, candidates, boundary checks, stitch decisions |
+| LLM (brain) | **Claude** Sonnet 5.5 + Haiku 5.5 (Anthropic SDK); **Groq** `openai/gpt-oss-120b` fallback | Campaigns, candidates, boundary checks, stitch decisions |
 | Embeddings | **Local** `Qwen3-Embedding-0.6B`, 1024-dim | “Similar meaning” = “close numbers”, no API needed |
 | Database | **PostgreSQL + pgvector** via `psycopg2-binary`, `pgvector` lib | Videos, chunks, clips, candidates, plans, progress; HNSW vector search |
 | Video editing | **FFmpeg/FFprobe** (`libx264`, `fast`, `crf 23`, `aac`), **OpenCV** (YuNet faces, saliency) | Cut, track faces/speakers, 1080×1920 virtual camera, ASS subtitles, logo, ducked music, fades |
@@ -168,7 +168,7 @@ viral-clips/
 │   ├── framing.py           # the "virtual cameraman": faces, scene cuts, camera moves, layouts.
 │   ├── active_speaker.py    # who is talking? (lip movement + audio) → which shot to show.
 │   ├── workspace.py         # gives every video its own work/ and output/ folders.
-│   ├── llm_client.py        # talks to Groq: 4 keys, waits out rate limits, strict JSON.
+│   ├── llm_client.py        # Claude first (Sonnet/Haiku), Groq fallback: 4 keys, waits out rate limits, strict JSON.
 │   ├── captions.py          # phrase karaoke subtitles (ASS), top/bottom auto-placement.
 │   ├── glossary.py          # fixes names/terms in subtitles, logged to glossary.json.
 │   ├── regen_srt.py         # words → .srt subtitles with stitch-aware timing.

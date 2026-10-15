@@ -8,7 +8,11 @@ Exposes both:
   - get_config() — reads config.yaml and merges .env overrides, used by all new modules
     (db/connection.py, pipeline/chunker.py, pipeline/embedder.py, pipeline/similarity.py).
 
-Provider: Groq (OpenAI-compatible) for LLM + local SentenceTransformer for embeddings.
+Provider: Claude (Anthropic) primary, Groq (OpenAI-compatible) fallback for LLM
++ local SentenceTransformer for embeddings.
+  Claude:       Sonnet 5.5 for discovery/analyzer, Haiku 5.5 for everything else
+                (CLAUDE_SONNET_MODEL / CLAUDE_HAIKU_MODEL / CLAUDE_SONNET_STAGES)
+  Groq:         used only when Claude is unset/down (LLM_PROVIDER=groq forces it)
   LLM Base URL: https://api.groq.com/openai/v1
   LLM model:    configurable via GROQ_MODEL env var (default: openai/gpt-oss-120b)
   Embed model:  local path via EMBED_MODEL env var (default: models/Qwen3-Embedding-0.6B)
@@ -39,6 +43,17 @@ GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_LLM_MODEL = os.getenv(
     "GROQ_MODEL", os.getenv("GROK_MODEL", os.getenv("GROK_LLM_MODEL", "openai/gpt-oss-120b"))
 )
+
+# ── Claude (primary LLM) ──────────────────────────────────────────────────────
+# ANTHROPIC_API_KEY set -> every LLM call goes to Claude first; Groq above is
+# the fallback when Claude errors / is down (see pipeline/llm_client.py).
+# LLM_PROVIDER: "claude" (default: Claude first, Groq fallback) | "groq" (Groq only).
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "claude").strip().lower()
+CLAUDE_SONNET_MODEL = os.getenv("CLAUDE_SONNET_MODEL", "claude-sonnet-5-5")
+CLAUDE_HAIKU_MODEL = os.getenv("CLAUDE_HAIKU_MODEL", "claude-haiku-5-5")
+# Call purposes routed to Sonnet (everything else -> Haiku).
+CLAUDE_SONNET_STAGES = os.getenv("CLAUDE_SONNET_STAGES", "discovery,analyzer")
 
 # ── Local embeddings (SentenceTransformer, no API key needed) ─────────────────
 # Directory or HF id of the embedding model. EMBED_MODEL_PATH is accepted as a
@@ -89,7 +104,9 @@ def get_config() -> dict:
     # Groq LLM overrides: env vars win over config.yaml so models can be swapped
     # from .env without touching code.
     ai_cfg = dict(cfg.get("ai", {}))
-    ai_cfg["provider"] = "groq"
+    ai_cfg["provider"] = "groq" if LLM_PROVIDER == "groq" else "claude+groq"
+    ai_cfg["claude_sonnet_model"] = CLAUDE_SONNET_MODEL
+    ai_cfg["claude_haiku_model"] = CLAUDE_HAIKU_MODEL
     ai_cfg["llm_model"] = GROQ_LLM_MODEL
     ai_cfg["llm_endpoint"] = LLM_API_URL
 

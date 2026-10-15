@@ -11,7 +11,7 @@ paths:
   temp_dir: "temp/"
 
 ai:
-  provider: "groq"
+  provider: "claude+groq"   # Claude primary (Sonnet 5.5 / Haiku 5.5), Groq fallback; set in .env
   llm_model: "openai/gpt-oss-120b"
   llm_endpoint: "https://api.groq.com/openai/v1/chat/completions"
 

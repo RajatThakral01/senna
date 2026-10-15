@@ -8,7 +8,7 @@
 
 **Viral Clips Automator** is an end-to-end autonomous AI pipeline that transforms long-form videos (podcasts, interviews, streams, webinars) into high-performing 9:16 vertical short-form viral clips optimized for **TikTok**, **Instagram Reels**, and **YouTube Shorts**.
 
-Built with **Groq LLM** (`openai/gpt-oss-120b` for understanding text), **local SentenceTransformer embeddings** (`Qwen3-Embedding-0.6B`, 1024-dim, no API key), **WhisperX** (`small`, word-level transcription), **PostgreSQL + pgvector** (HNSW semantic memory), **OpenCV** (YuNet face tracking, saliency, active-speaker detection) and **FFmpeg** (virtual-camera 9:16 framing, ASS karaoke captions, single-pass polish).
+Built with **Claude** (Sonnet 5.5 for discovery/analysis, Haiku 5.5 for every other LLM call) with **Groq** (`openai/gpt-oss-120b`) as automatic fallback, **local SentenceTransformer embeddings** (`Qwen3-Embedding-0.6B`, 1024-dim, no API key), **WhisperX** (`small`, word-level transcription), **PostgreSQL + pgvector** (HNSW semantic memory), **OpenCV** (YuNet face tracking, saliency, active-speaker detection) and **FFmpeg** (virtual-camera 9:16 framing, ASS karaoke captions, single-pass polish).
 
 Verified end-to-end on real long-form footage: a 58-minute video → 14 clips and a 27-minute video → 13 clips (64 minutes end to end on an 8 GB M-series Mac, CPU only).
 
@@ -73,7 +73,7 @@ flowchart TD
 ## 📦 Tech Stack
 
 - **Core**: Python 3.10+, PyYAML, Requests, Subprocess
-- **LLM**: Groq API (`openai/gpt-oss-120b`, OpenAI-compatible) — campaign parsing, discovery, boundary validation, similarity classification
+- **LLM**: Claude primary — `claude-sonnet-5-5` for discovery + analyzer, `claude-haiku-5-5` for outline, enrich, similarity, campaign/brief parsing and boundary validation. Groq (`openai/gpt-oss-120b`) is the fallback when Claude fails or is down (`pipeline/llm_client.py`).
 - **Embeddings**: Local SentenceTransformer (`models/Qwen3-Embedding-0.6B`, 1024-dim) — no API key needed
 - **Speech-to-Text**: WhisperX `small` (word-level timestamps) + librosa
 - **Database**: PostgreSQL 15+ with `pgvector` extension (Docker `pgvector/pgvector:pg16` recommended)
@@ -102,13 +102,29 @@ flowchart TD
    sudo apt install -y postgresql-16 postgresql-16-pgvector
    sudo systemctl start postgresql
    ```
-4. **Groq API keys** (LLM only — embeddings are local): free at [console.groq.com/keys](https://console.groq.com/keys). Fill all four slots (`GROQ_API_KEY`, `_2`, `_3`, `_FALLBACK`); the pipeline routes stages across keys and falls back automatically.
+4. **Anthropic API key** (`ANTHROPIC_API_KEY`, primary LLM) and **Groq API keys** (fallback LLM; embeddings are local): free at [console.groq.com/keys](https://console.groq.com/keys). Fill all four slots (`GROQ_API_KEY`, `_2`, `_3`, `_FALLBACK`); the pipeline routes stages across keys and falls back automatically.
 5. **Node.js or Deno** (for HD YouTube downloads — yt-dlp needs a JS runtime to unlock ≥720p formats; without one the pipeline refuses SD sources instead of producing blurry clips).
 5. **Local embedding model**: `models/Qwen3-Embedding-0.6B` (or set `EMBED_MODEL` to a local dir / HuggingFace id; dim must match `vector(1024)` or `EMBED_DIM`).
 
 ---
 
-## 🚀 Quickstart & Setup
+## 🐳 Run with Docker (recommended)
+
+```bash
+cp .env.example .env            # add your GROQ_API_KEY* values (DB_* are set by compose)
+docker compose up -d --build    # first build ~15 min (4.2 GB image: CPU PyTorch, WhisperX, ffmpeg, deno)
+open http://localhost:7862      # the UI
+docker compose exec app python main.py job status    # CLI inside the container
+docker compose logs -f app                           # live logs
+docker compose down                                  # stop (data is kept)
+```
+
+- **Services:** `db` (pgvector/pg16, data in the `pgdata` volume, published on `localhost:5433`) and `app` (Gradio UI on `7862` + background job worker + CLI). The app applies the schema and migrations on every start (idempotent).
+- **Mounted from this folder** (so files survive rebuilds and you can open them directly): `downloads/`, `output/` (deliverables in `output/campaigns/…`), `work/`, `logs/`, `models/` (Qwen3 embedding + YuNet — must exist, see Prerequisites), `assets/`, `cache/` (Whisper/alignment model downloads) and **`media/`** — drop local videos there and use `/app/media/<file>` (or `/app/media/` for the whole folder) in **New job**. Links and UI uploads work as usual.
+- **Memory:** Docker Desktop's default ~4 GB is enough for edit-mode jobs (peak 2.9 GB measured); long videos in clip mode (transcription + embeddings + rendering) need more — set **Docker Desktop → Settings → Resources → Memory to 6 GB+**.
+- Captions use Liberation Sans in the container (metric-compatible with Arial). torchcodec is left out of the image (no linux-arm64 wheel; unused).
+
+## 🚀 Quickstart & Setup (native)
 
 ### 1. Clone the Repository
 
@@ -153,7 +169,9 @@ cp .env.example .env
 ```
 
 ```env
-# Groq LLM (embeddings are local — no key needed)
+# Claude = primary LLM; Groq = fallback (embeddings are local — no key needed)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+# LLM_PROVIDER=groq  # force Groq only
 # Slots: key1 = outline/discovery, key2 = similarity, key3 = campaign/analyzer,
 # key4 = automatic fallback. Empty slots are skipped.
 GROQ_API_KEY=your_groq_api_key_1_here
@@ -279,7 +297,7 @@ viral-clips/
 Key `config.yaml` sections (all tunable without code edits):
 
 ```yaml
-ai: {provider: groq, llm_model: openai/gpt-oss-120b}
+ai: {provider: claude+groq, llm_model: openai/gpt-oss-120b}  # llm_model = Groq fallback model
 embeddings: {model: models/Qwen3-Embedding-0.6B, truncate_dim: 1024}
 similarity: {top_k: 3, threshold: 0.5, max_stitch_gap_seconds: 45, max_total_seconds: 90}
 discovery: {target_clips: 15, min_span_seconds: 15, max_span_seconds: 90}  # target = maximum
@@ -320,7 +338,7 @@ See [OPEN_ISSUES.md](OPEN_ISSUES.md). To measure framing quality on a rendered v
 
 ## 🛡️ Security & Privacy
 
-- **Never commit your `.env` file**. No secrets are hardcoded — an empty `GROQ_API_KEY` triggers mock/fallback paths.
+- **Never commit your `.env` file**. No secrets are hardcoded — with no `ANTHROPIC_API_KEY` and no `GROQ_API_KEY` the pipeline takes its mock/fallback paths.
 - All secrets load strictly via environment variables.
 
 ---

@@ -10,6 +10,7 @@ every part works, where things live, what is verified and what is not. Open prob
 **`OPEN_ISSUES.md`**; history in §9 and `implementation_plan.md`.
 
 > **Built — campaign pipeline (C1–C8 ✅, 10 Oct 2026):** data model (`db/migration_v7.sql`, `db/repositories/campaign_repo.py` + `job_repo.py`), `campaign/service.py` (campaigns, assets, recipes), `campaign/recipe.py` + `presets.py` + `brief_parser.py`, compositor `pipeline/compositor.py`, `campaign/edit_mode.py`, `campaign/clip_mode.py`, `campaign/jobs.py` (router, runner, worker), `campaign/qa.py`, `campaign/delivery.py`, CLI `campaign/cli.py` (`python main.py campaign …` / `job …`), UI `campaign_ui.py` (tabs 1–4 of `ui.py`). Tests `test_campaigns.py`, `test_recipe.py`, `test_compositor.py`, `test_edit_mode.py`, `test_jobs.py`, `test_qa.py`, `test_campaign_ui.py` (suite 403). Details + progress log: `CAMPAIGN_PIPELINE_PLAN.md` §11.
+> **Docker (11 Oct 2026):** `Dockerfile` + `docker-compose.yml` (services `db` pgvector/pg16 on host 5433, volume `pgdata`; `app` UI :7862) + `docker/entrypoint.sh` (waits for the DB, runs `db/init_db.sh`); packages pinned in `requirements-docker.txt` (venv freeze minus torchcodec); runtime dirs + `models/` + `cache/` (HF/torch) + `media/` (local videos → `/app/media/…`) are bind-mounted. 403 tests pass inside the container. The old native `viral-clips-db` container is stopped (data migrated into compose `db`). QA loudness now uses loudnorm's measurement (ebur128 framelog=quiet reports 0 on ffmpeg 5.1).
 > **Next:** a browser pass through the campaign UI (`OPEN_ISSUES.md` 5.1) and real campaign trials; then the fix roadmap for open HIGH/MEDIUM issues: `OPEN_ISSUES.md` §0 (parked by the user).
 
 ---
@@ -20,7 +21,7 @@ Turns long-form video (podcasts, interviews, challenge videos, streams) into 9:1
 for TikTok / Reels / Shorts, aiming at OpusClip-level output: complete stories (hook → payoff),
 the speaker framed full-screen, smooth "virtual camera" motion, karaoke captions, one-pass polish.
 
-**Stack:** Groq LLM (`openai/gpt-oss-120b`, OpenAI-compatible) for understanding text; **local**
+**Stack:** Claude LLM (Sonnet 5.5 for discovery/analyzer, Haiku 5.5 for all other calls) with Groq (`openai/gpt-oss-120b`, OpenAI-compatible) as automatic fallback, for understanding text; **local**
 SentenceTransformer embeddings (`models/Qwen3-Embedding-0.6B`, 1024-dim) in PostgreSQL +
 pgvector; WhisperX (`small`, int8 on CPU) for word-level transcripts; OpenCV (YuNet faces,
 spectral-residual saliency) + FFmpeg for cutting, framing, captions and polish; Gradio UI.
@@ -51,7 +52,7 @@ reject" intentionally return fewer.
 - **Database:** Docker container `viral-clips-db` (`pgvector/pgvector:pg16`, volume
   `viral_clips_pgdata`, `--restart unless-stopped`) on **port 5433** — another Postgres already
   uses 5432 on this Mac. Schema via `db/init_db.sh --docker viral-clips-db`.
-- **`.env`:** `GROQ_API_KEY`, `_2`, `_3`, `_FALLBACK` (free tier: 8,000 tokens/min/key),
+- **`.env`:** `ANTHROPIC_API_KEY` (primary; `LLM_PROVIDER=groq` forces Groq; `CLAUDE_SONNET_STAGES`, `CLAUDE_*_MODEL`, `CLAUDE_*_EFFORT`, `CLAUDE_COOLDOWN_SECONDS` tune routing), then fallback `GROQ_API_KEY`, `_2`, `_3`, `_FALLBACK` (free tier: 8,000 tokens/min/key),
   `DB_PORT=5433`, `DB_PASSWORD=postgres`. Template: `.env.example`. Never print key values.
 - **Models:** `models/Qwen3-Embedding-0.6B/` (1.1 GB), `models/face_detection_yunet_2023mar.onnx`
   (auto-downloaded), Whisper `small` + English align model in the HuggingFace cache.
@@ -260,6 +261,15 @@ Every LLM call goes through `post_chat(payload, timeout, slot, purpose, json_mod
   once failed with truncated JSON. `finish_reason == "length"` is logged.
 - **JSON mode** (`response_format: json_object`) for outline, combine, discovery, boundaries;
   a 400 `json_validate_failed` retries the same key without JSON mode.
+- **Claude primary (`post_chat`):** if `ANTHROPIC_API_KEY` is set, each call is translated
+  to the Messages API (system msgs -> `system`, `temperature` dropped — Sonnet/Haiku 5.5 reject
+  it, adaptive thinking + `CLAUDE_THINKING_HEADROOM` added to `max_tokens`, JSON mode -> system
+  instruction) and the reply is wrapped back into chat-completions shape (`ClaudeChatResponse`),
+  so callers are unchanged. Purpose `discovery`/`analyzer` -> Sonnet 5.5 (effort medium,
+  server-side refusal `fallbacks: "default"`); others -> Haiku 5.5 (effort medium). Any Claude
+  failure (network, 5xx/overloaded, 429 after SDK retries, auth, refusal, empty) falls through
+  to the Groq path below; outage-type errors open a `CLAUDE_COOLDOWN_SECONDS` breaker, auth
+  errors disable Claude for the process. Tests: conftest autouse fixture blanks the key.
 - **Rate limits:** when every key returns 429 on a per-minute budget, wait the reset Groq
   reports (retry-after / x-ratelimit-reset-* / "try again in Xs", 2–65 s) and retry, up to
   `LLM_RATE_LIMIT_MAX_WAIT` (300 s) per call; daily (TPD/RPD) limits fail fast.

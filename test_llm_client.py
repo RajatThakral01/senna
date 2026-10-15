@@ -190,3 +190,92 @@ class TestRateLimitWait:
             with pytest.raises(L.requests.exceptions.HTTPError):
                 L.post_chat({"model": "m", "max_tokens": 5}, timeout=5, slot=1)
         assert sum(slept) <= 10
+
+
+# ── Claude primary + Groq fallback ───────────────────────────────────────────
+
+def _claude_msg(text='{"ok": true}', stop="end_turn", model="claude-haiku-5-5"):
+    m = MagicMock()
+    m.stop_reason = stop
+    m.model = model
+    m.content = [MagicMock(type="thinking"), MagicMock(type="text", text=text)]
+    m.usage.input_tokens, m.usage.output_tokens = 10, 5
+    return m
+
+
+def _fake_client(create=None, beta_create=None):
+    c = MagicMock()
+    c.messages.create.side_effect = create
+    c.beta.messages.create.side_effect = beta_create
+    return c
+
+
+class TestClaude:
+    @pytest.fixture(autouse=True)
+    def _claude_on(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    def test_haiku_default_translated_and_wrapped(self, monkeypatch):
+        c = _fake_client(create=[_claude_msg()])
+        monkeypatch.setattr(llm_client, "_claude_client", lambda t: c)
+        with _keys(GROQ_API_KEY="k1"), patch("pipeline.llm_client.requests.post") as mp:
+            r = post_chat({"model": "groq-m", "temperature": 0.3, "max_tokens": 500,
+                           "messages": [{"role": "system", "content": "S"},
+                                        {"role": "user", "content": "U"}]},
+                          timeout=10, slot=3, purpose="boundaries", json_mode=True)
+        mp.assert_not_called()
+        assert r.json()["choices"][0]["message"]["content"] == '{"ok": true}'
+        kw = c.messages.create.call_args.kwargs
+        assert kw["model"] == "claude-haiku-5-5"
+        assert "temperature" not in kw and kw["max_tokens"] == 4500
+        assert kw["messages"] == [{"role": "user", "content": "U"}]
+        assert kw["system"].startswith("S") and "JSON" in kw["system"]
+        assert kw["output_config"] == {"effort": "medium"}
+
+    def test_sonnet_for_discovery_with_refusal_fallback(self, monkeypatch):
+        c = _fake_client(beta_create=[_claude_msg(model="claude-sonnet-5-5")])
+        monkeypatch.setattr(llm_client, "_claude_client", lambda t: c)
+        post_chat({"messages": [{"role": "user", "content": "U"}], "max_tokens": 3000},
+                  timeout=10, slot=1, purpose="discovery")
+        kw = c.beta.messages.create.call_args.kwargs
+        assert kw["model"] == "claude-sonnet-5-5" and kw["fallbacks"] == "default"
+        assert kw["output_config"] == {"effort": "medium"}
+        c.messages.create.assert_not_called()
+
+    def test_claude_down_falls_back_to_groq_and_cools_down(self, monkeypatch):
+        import anthropic, httpx2
+        err = anthropic.APIConnectionError(request=httpx2.Request("POST", "https://x"))
+        c = _fake_client(create=[err])
+        monkeypatch.setattr(llm_client, "_claude_client", lambda t: c)
+        with _keys(GROQ_API_KEY="k1"), patch("pipeline.llm_client.requests.post") as mp:
+            mp.return_value = _resp(200, "groq")
+            r1 = post_chat({"messages": []}, timeout=10, slot=1, purpose="outline")
+            r2 = post_chat({"messages": []}, timeout=10, slot=1, purpose="outline")
+        assert r1.json()["choices"][0]["message"]["content"] == "groq"
+        assert mp.call_count == 2 and c.messages.create.call_count == 1  # breaker open
+
+    def test_refusal_falls_back_to_groq(self, monkeypatch):
+        c = _fake_client(create=[_claude_msg(text="", stop="refusal")])
+        monkeypatch.setattr(llm_client, "_claude_client", lambda t: c)
+        with _keys(GROQ_API_KEY="k1"), patch("pipeline.llm_client.requests.post") as mp:
+            mp.return_value = _resp(200, "groq")
+            r = post_chat({"messages": []}, timeout=10, slot=1, purpose="outline")
+        assert r.json()["choices"][0]["message"]["content"] == "groq"
+
+    def test_claude_fail_without_groq_raises_connection_error(self, monkeypatch):
+        c = _fake_client(create=[RuntimeError("boom")])
+        monkeypatch.setattr(llm_client, "_claude_client", lambda t: c)
+        with _keys():
+            assert pool_usable() is True
+            with pytest.raises(requests.exceptions.ConnectionError):
+                post_chat({"messages": []}, timeout=10, slot=1)
+
+    def test_provider_groq_skips_claude(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "groq")
+        monkeypatch.setattr(llm_client, "_claude_client",
+                            lambda t: (_ for _ in ()).throw(AssertionError("claude used")))
+        with _keys(GROQ_API_KEY="k1"), patch("pipeline.llm_client.requests.post") as mp:
+            mp.return_value = _resp(200, "groq")
+            r = post_chat({"messages": []}, timeout=10, slot=1, purpose="discovery")
+        assert r.json()["choices"][0]["message"]["content"] == "groq"

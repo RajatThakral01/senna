@@ -1,0 +1,48 @@
+# docker compose up -d --build   → UI at http://localhost:7862
+# CLI inside the app container:   docker compose exec app python main.py job status
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: viral_clips
+    ports:
+      - "5433:5432"            # same port the native setup used (host tools / CLI)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d viral_clips"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    image: senna-viral-clips:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env             # API keys stay on the host, never in the image
+    environment:
+      DB_HOST: db              # these win over the host-oriented values in .env
+      DB_PORT: "5432"
+      DB_NAME: viral_clips
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      YT_MAX_HEIGHT: "1080"
+    ports:
+      - "7862:7862"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./output:/app/output
+      - ./work:/app/work
+      - ./logs:/app/logs
+      - ./models:/app/models          # Qwen3 embedding + YuNet face model
+      - ./assets:/app/assets          # logos, music, campaign asset libraries
+      - ./media:/app/media            # put local videos here → use /app/media/<file> in New job
+      - ./cache:/cache                # Whisper / alignment model downloads
+    restart: unless-stopped
+
+volumes:
+  pgdata:

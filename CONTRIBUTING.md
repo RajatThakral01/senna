@@ -31,7 +31,7 @@ Thank you for your interest in contributing to **Viral Clips Automator**! We wel
     ```
 
 5. **Configure Environment Variables**:
-    Copy `.env.example` to `.env` and fill in your Groq API key (LLM only — embeddings run locally) and database connection details:
+    Copy `.env.example` to `.env` and fill in your Anthropic API key (primary LLM) and Groq API keys (fallback LLM — embeddings run locally) and database connection details:
    ```bash
    cp .env.example .env
    ```

@@ -2,7 +2,22 @@
 import sys
 import os
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_claude(monkeypatch):
+    """Keep tests off the paid Claude API: a real ANTHROPIC_API_KEY loaded from
+    .env would otherwise route every mocked-Groq test to Claude. Tests that
+    exercise the Claude path set the key themselves."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    try:
+        from pipeline import llm_client
+        monkeypatch.setattr(llm_client, "_claude_down_until", 0.0)
+    except Exception:
+        pass
 
 
 def cleanup_video(vid):

@@ -7,7 +7,7 @@ compositor's intentions) and returns
   duration    within the platform preset limit and the recipe's trim / clip spec
   format      expected resolution + aspect, H.264 video, AAC audio
   size        under the platform's file-size limit
-  audio       an audio stream exists; integrated loudness near the preset (ebur128)
+  audio       an audio stream exists; integrated loudness near the preset (loudnorm)
   replaced    audio.replace without the original kept → the output sounds like
               the replacement track (spectrum / envelope match)
   logo        the logo's pixels are present where the recipe puts it
@@ -46,14 +46,20 @@ def _check(cid, label, status, detail=""):
 # ── measurements ─────────────────────────────────────────────────────────────
 
 def loudness(path):
-    """Integrated loudness (LUFS) via ebur128, or None."""
+    """Integrated loudness (LUFS), or None for silence. Uses loudnorm's measurement
+    (ebur128=framelog=quiet reports 0.0 on ffmpeg 5.1, the Debian/Docker build)."""
+    import json as _json
     r = subprocess.run([_ffmpeg(), "-hide_banner", "-nostats", "-i", path, "-vn",
-                        "-af", "ebur128=framelog=quiet", "-f", "null", "-"],
+                        "-af", "loudnorm=print_format=json", "-f", "null", "-"],
                        capture_output=True, text=True)
-    m = re.findall(r"I:\s+(-?[\d.]+|-inf)\s+LUFS", r.stderr)
-    if not m or m[-1] == "-inf":
+    m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)
+    if not m:
         return None
-    return float(m[-1])
+    try:
+        val = float(_json.loads(m.group(0))["input_i"])
+    except (ValueError, KeyError):
+        return None              # "-inf" → silent
+    return None if val < -70 else val
 
 
 def _pcm(path, start=0.0, dur=None, sr=8000, loop=False):
