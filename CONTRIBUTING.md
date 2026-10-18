@@ -52,7 +52,9 @@ Thank you for your interest in contributing to **Viral Clips Automator**! We wel
    - Make sure runtime folders (`downloads/`, `work/`, `output/`, `logs/`, `models/`) are not committed (they are git-ignored).
    - Never hard-code `transcripts/`, `clips/` or `output/` paths — use `pipeline.workspace.current()`.
    - New `config.yaml` top-level sections must be added to the whitelist in `config.py:get_config()`.
-   - Run the tests before pushing: `.venv/bin/python -m pytest -q` (300 tests; needs the DB).
+   - Run the tests before pushing: `docker exec senna-dev-app-1 python -m pytest -q` (474 tests; the container reaches the DB), or `.venv/bin/python -m pytest -q` with the DB on localhost:5433.
+   - UI changes: also run the browser tests against the running app: `E2E_URL=http://localhost:7862 pytest -q test_ui_e2e.py` (needs `pip install playwright && python -m playwright install chromium`).
+   - Keep the context files current after a milestone: `AGENT_CONTEXT.md`, `OPEN_ISSUES.md`, `README.md`, `explanation.md`, `implementation_plan.md`, `workflow.md`.
    - Framing changes: compare `tools/framing_audit.py <video_id>` before/after and check the
      `--debug-framing` videos. Read `AGENT_CONTEXT.md` (architecture) and `OPEN_ISSUES.md` first.
 

@@ -1,6 +1,7 @@
 # Open Issues
 
-Status as of 10 Oct 2026, after two real end-to-end runs — MrBeast "Eat Everything In A Grocery
+Status as of 18 Oct 2026 (§5 updated after the first real campaign run, 15–16 Oct); §1–§4 as of
+10 Oct 2026, after two real end-to-end runs — MrBeast "Eat Everything In A Grocery
 Store" (58 min → 14 clips) and MrBeast "100 Kids Vs World's Strongest Man!" (27 min → 13 clips,
 64 min end to end on this Mac) — and the fixes/Phase D framing work that followed.
 Everything fixed during that work is listed in `AGENT_CONTEXT.md` §9 (v4.2–v4.6) and `implementation_plan.md` (Phases 9–14). This file
@@ -194,11 +195,14 @@ Not on the roadmap: 2.3 (provider switch planned — small change in `llm_client
   the wrong campaign ("C8 Trial" demo: ACME intro, "You need this" hook, @acme end card) while
   the intended campaign (u2) was a draft; table rows weren't clickable; no next/prev; the
   approve/reject result showed at the page bottom; Clip review always showed clip 1; a
-  double-click queued the same job twice. All fixed; see AGENT_CONTEXT §5.9.
-- `test_ui_e2e.py` (Playwright, runs on the host against the live app) now covers Review &
-  deliver (row click, approve/reject auto-advance, ◀/▶, DB state), New-job campaign refresh
-  and summary, and the Clip-review picker. Still not browser-tested: Tab 1 asset upload +
-  parse, Tab 2 upload/run, Tab 5 Quick clips, Clip-review apply/re-render buttons.
+  double-click queued the same job twice. All fixed; see AGENT_CONTEXT §5.9. The UI was then
+  reworked (16 Oct): renamed tabs, status banner, Progress tab with live activity feed.
+- `test_ui_e2e.py` (Playwright, runs on the host against the live app) covers Review &
+  download (row click, approve/reject auto-advance, ◀/▶, DB state), the running-job banner +
+  Progress card + feed, Start-a-job campaign refresh and summary, and the Fix-a-clip picker.
+  The Re-export button was clicked once in a real run. Still not browser-tested: Tab 1 asset
+  upload + "Read the brief", Tab 2 upload/run end to end, Quick clips, Fix-a-clip
+  apply/re-render buttons.
 
 ### 5.5 Fixed on 15 Oct 2026 during the u2 rerun (for the record)
 - OOM kill on the 4 GB Docker VM (Whisper memory kept + embedding model) → transcription in a
@@ -207,12 +211,27 @@ Not on the roadmap: 2.3 (provider switch planned — small change in `llm_client
   the song input crashed on "HH:MM:SS" times in that path. Both fixed. Outlines cached before
   this fix still say "cached": invalidate the outline stage to refresh them.
 - Top text covered faces on wide talk-show crops → moved to the bottom when the face is high.
-- Docker VM has only 4 GB: raising Docker Desktop's memory to 6 GB would add headroom.
+- (16 Oct) Each platform got a byte-identical copy (42 files for 14 clips) → one file per
+  format; plain Arial text in a dark box → TikTok-style white box, Montserrat, balanced lines,
+  highlights; the brief parser silently dropped `{auto}`; highlighted phrases split across lines.
+
+### 5.6 Docker VM has 4 GB — LOW
+- Long videos fit now (child-process transcription, embedding model released before framing),
+  but framing + compose peak near 1.3 GB on top of the UI; raising Docker Desktop's memory to
+  6 GB adds headroom. If the Mac sleeps, Docker pauses and jobs resume when it wakes.
+
+### 5.7 Montage-style briefs are not supported — MEDIUM (feature gap)
+- Briefs like "Don't Chart – Cardi B" (sports edits cut to a song from many sources, beat-synced)
+  need multi-source montage + beat detection; the tool cuts moments from one video at a time.
+  Platform sounds ("use the official sound") can't be attached by the tool — the AI caption
+  names the sound/song to pick when posting.
 
 ### 5.4 AI-written on-screen text (`{auto}`) — quality not yet measured — MEDIUM
-- `campaign/onscreen_text.py` writes one line per clip with Haiku 5.5 (purpose
-  `onscreen_text`). First live samples were on-brief; nobody has rated a full run yet. If the
-  lines are weak, route `onscreen_text` to Sonnet (`CLAUDE_SONNET_STAGES`).
+- `campaign/onscreen_text.py` writes one line + one caption per clip with Haiku 5.5 (purpose
+  `onscreen_text`). The 14 u2 lines and samples for the Estevie / George Michael briefs were
+  on-brief and varied; a few were weak ("Arr, Marcus!"). Nobody has rated a full run against a
+  campaign's approval criteria yet. If lines are weak, route `onscreen_text` to Sonnet
+  (`CLAUDE_SONNET_STAGES=discovery,analyzer,onscreen_text`) or rewrite single files in Review.
 
 ### 5.2 CI test job never run — MEDIUM
 - `.github/workflows/ci.yml` now has a `tests` job (pgvector service, CPU torch, ffmpeg).

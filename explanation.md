@@ -1,6 +1,6 @@
 # Viral Clips Automator — End-to-End Explanation
 
-> This document explains the project from zero: what it does in simple words, then every technical piece, how files connect, what happens in the background, and what tech it uses. (Last synced 10 Oct 2026 — 11-stage pipeline, Groq LLM + local embeddings, per-video workspaces + resume, OpusClip-style framing, campaign pipeline (§13). Full technical detail: `AGENT_CONTEXT.md`; known problems: `OPEN_ISSUES.md`.)
+> This document explains the project from zero: what it does in simple words, then every technical piece, how files connect, what happens in the background, and what tech it uses. (Last synced 18 Oct 2026 — 11-stage pipeline, Claude LLM (Groq fallback) + local embeddings, per-video workspaces + resume, OpusClip-style framing, campaign pipeline (§13), AI on-screen text + captions and the live-progress UI (§14). User guide: `workflow.md`. Full technical detail: `AGENT_CONTEXT.md`; known problems: `OPEN_ISSUES.md`.)
 
 ---
 
@@ -80,7 +80,7 @@ logs/runs/<date-time>_<source>.log       a log file for every run
                            ▼
                     ┌─────────────┐      ┌──────────────────┐
                     │ input_handler│     │ campaign_parser  │
-                    │ download once│      │ Groq LLM turns   │
+                    │ download once│      │ Claude LLM turns │
                     │ → downloads/ │      │ English → JSON   │
                     │ (cached)     │      └────────┬─────────┘
                     └──────┬──────┘               │
@@ -99,7 +99,7 @@ logs/runs/<date-time>_<source>.log       a log file for every run
                            ▲   ▲   ▲
                            │   │   │
    ┌──────────────┐  ┌─────┴───┴───┴──────┐  ┌──────────────┐
-   │ WhisperX     │  │ Groq LLM (cloud)   │  │ FFmpeg +     │
+   │ WhisperX     │  │ Claude LLM (cloud) │  │ FFmpeg +     │
    │ speech→text  │  │ + local embeddings │  │ OpenCV faces │
    │ (local)      │  │ (Qwen3, local)     │  │ cut/frame/   │
    └──────────────┘  └────────────────────┘  │ burn/mix     │
@@ -127,7 +127,7 @@ One database (PostgreSQL, in Docker) glues everything together. One video tool (
 | Video editing | **FFmpeg/FFprobe** (`libx264`, `fast`, `crf 23`, `aac`), **OpenCV** (YuNet faces, saliency) | Cut, track faces/speakers, 1080×1920 virtual camera, ASS subtitles, logo, ducked music, fades |
 | Config | **YAML** (`config.yaml`) + `python-dotenv` + `config.py` | All tunables in one place, secrets in `.env` |
 | Web UI | **Gradio** (`ui.py`, port 7862) | Generate + Review & Correct tabs |
-| Tests | **pytest** (300/300 green, LLM mocked) | Fast tests; repo tests use the Docker database |
+| Tests | **pytest** (474 green, LLM mocked; + Playwright browser tests) | Fast tests; repo tests use the Docker database |
 | Database server | **Docker** `pgvector/pgvector:pg16` on port 5433 | One command to run Postgres + pgvector |
 
 ---
@@ -143,7 +143,7 @@ viral-clips/
 ├── preview_framing.py / demo_faces.py / bench_transcribe.py   # Verification scripts only.
 ├── config.yaml              # ALL settings (chunking, similarity, outline, discovery, audio,
 │                            # fusion, captions, refine, framing, export, ...).
-├── config.py                # Reads config.yaml + .env. Groq key/model, embedding settings.
+├── config.py                # Reads config.yaml + .env. Claude + Groq keys/models, embedding settings.
 │
 ├── input/input_handler.py   # detect_source_type() + handle_input() → cached download / local file
 │
@@ -246,7 +246,7 @@ Ranked candidates + per-clip detail → edit boundaries (validated), layout, or 
 ---
 
 ### Campaign tabs
-See §13 — Campaigns → New job → Jobs → Review & deliver sit in front of the two tabs above.
+See §13 — Set up campaign → Start a job → Progress → Review & download sit in front of the two tabs above.
 
 ---
 
@@ -289,12 +289,13 @@ Resume logic: finished stages are skipped; changed inputs (new transcript, new c
 | What | Where | Cost |
 |---|---|---|
 | `yt-dlp` / `ffmpeg` / WhisperX | Your machine | CPU/GPU time only |
-| Groq LLM calls | `api.groq.com` | Campaign (1×), outline (1×/window), discovery (1×/window), similarity + boundaries (small) — 429-aware retries; polite delays |
+| Claude LLM calls | `api.anthropic.com` | Campaign (1×), outline (1×/window, Haiku), discovery (1×/window, Sonnet), similarity + boundaries (small, Haiku), on-screen text + caption (1× per clip, Haiku) |
+| Groq LLM calls (fallback) | `api.groq.com` | Only when Claude errors or is down — same calls, 429-aware key rotation |
 | Local embeddings | Your machine | Free, no rate limits |
 | PostgreSQL | Docker `viral-clips-db`, `localhost:5433/viral_clips` | Every stage |
 | Gradio | `localhost:7862` | Only with `ui.py` |
 
-Groq's free tier allows ~8,000 tokens per minute per key (~1 big call per key per minute). When all 4 keys are busy the pipeline **waits** for the per-minute budget to reset (log lines "all 4 keys rate-limited; waiting 3s…" are normal) instead of failing. A 27-minute video's LLM stages take ~5 minutes this way.
+Claude has no free-tier waits; a long video's LLM stages take a few minutes and cost cents (Haiku for most calls). Groq is only used when Claude fails: its free tier allows ~8,000 tokens per minute per key, so while on Groq the pipeline **waits** for the per-minute budget to reset ("all 4 keys rate-limited; waiting 3s…") instead of failing.
 
 **Typical timing (27-minute video, this Mac):** download 1 min, transcription 4.5 min, LLM stages ~5 min, rendering ~50 min for 13 clips → ~64 min total.
 
@@ -302,7 +303,7 @@ Groq's free tier allows ~8,000 tokens per minute per key (~1 big call per key pe
 
 ## 10. Tests & Evidence
 
-- `.venv/bin/python -m pytest -q` → **403 green** (~3.5 min; LLM/network mocked; repository tests use the Docker DB; campaign tests render real video).
+- `.venv/bin/python -m pytest -q` → **474 green** (~3.5 min; LLM/network mocked; repository tests use the Docker DB; campaign tests render real video).
 - Campaign runs: edit mode on real-footage samples (logo, captions, CTA, intro card, colour, speed, watermark, end card, 2 hook versions) and clip mode on the MrBeast video (2 clips × TikTok + YouTube) — every QA check passing.
 - Real runs: two MrBeast videos end to end (58 min → 14 clips, 27 min → 13 clips), reviewed by eye and with `tools/framing_audit.py`. The second video's clips looked clearly better than the first; remaining weak spots (action that isn't a face, sliced faces, graphics) are listed in `OPEN_ISSUES.md`.
 - Not yet exercised: clicking through the Gradio UI in a browser (handlers are tested), the CI test job, diarization, YAMNet labels.
@@ -321,7 +322,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python tools/framing_audit.py <video_id>        # how good is the framing?
 .venv/bin/python main.py campaign create --name "Acme" --asset logo.png --brief "…"   # campaign
 .venv/bin/python main.py job run --campaign acme --input clip1.mp4 --input folder/     # run a job
-.venv/bin/python -m pytest -q                             # 403 tests
+.venv/bin/python -m pytest -q                             # 474 tests
 ```
 
 Change clip style: templates or `--campaign` English. Change look: `captions.*` / `framing.*` in `config.yaml`. Change pickiness: `fusion.min_score` / `discovery.target_clips`.
@@ -352,3 +353,33 @@ Change clip style: templates or `--campaign` English. Change look: `captions.*` 
 
 **UI:** tabs 1–4 of `ui.py` (`campaign_ui.py`). **CLI:** `python main.py campaign …` / `python main.py job …`. **Output:** `output/campaigns/<slug>/<job8>/`. Design + build log: `CAMPAIGN_PIPELINE_PLAN.md`.
 
+
+
+---
+
+## 14. What Changed on 15–16 Oct 2026 (Claude, UI, AI text)
+
+**In simple words:** the tool now uses Claude as its brain (Groq only as a backup), shows you
+what it is doing while it works, writes the text that goes on each clip and the caption you
+paste when posting, and makes one file per clip instead of three identical ones.
+
+- **LLM:** `pipeline/llm_client.py` sends every call to Claude first (Sonnet 5.5 for finding
+  clips, Haiku 5.5 for everything else) and falls back to Groq if Claude errors or is down.
+- **AI on-screen text + caption** (`campaign/onscreen_text.py`): a recipe text overlay whose
+  text is `{auto}` gets a fresh line per clip, written from the brief's rules and example
+  lines, varied across clips, with the key name *highlighted*. The same call writes the post
+  caption with every @tag / #hashtag / song the brief requires (shown as Posting text).
+- **Text look** (`pipeline/compositor.py`): TikTok-style white box per line, bundled
+  Montserrat ExtraBold, balanced 2–3 line breaks, and the text moves below the speaker's face.
+- **One file per format:** TikTok, Reels and Shorts all use 1080×1920, so a clip is one file
+  labelled "TikTok · Reels · Shorts".
+- **UI** (`ui.py`, `campaign_ui.py`, `campaign/activity.py`): tabs 1 Set up campaign → 2 Start
+  a job → 3 Progress → 4 Review & download; a status banner on every tab; a live progress card
+  and activity feed; click-to-open rows, ◀ / ▶, approve/reject auto-advance, Approve all that
+  passed QA, Re-export all files. Dropdowns no longer preselect (a job once ran on the wrong
+  campaign that way).
+- **Reliability:** transcription runs in a child process and the embedding model is unloaded
+  before framing, so long videos fit in Docker's 4 GB; reloaded AI outlines no longer get
+  padded with filler clips.
+
+Step-by-step usage: `workflow.md`.

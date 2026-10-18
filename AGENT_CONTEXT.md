@@ -1,17 +1,18 @@
 # 🤖 Agent Implementation Context: Viral Clips Automator
 
-**Version:** 5.0
-**Date:** 10 Oct 2026
-**Status:** 11-stage pipeline verified end-to-end on two real long-form videos (58 min → 14 clips,
-27 min → 13 clips); per-video workspaces + resume; OpusClip-style framing (Phases A–D);
-**300/300 tests green**.
+**Version:** 5.3
+**Date:** 18 Oct 2026
+**Status:** 11-stage pipeline verified end-to-end on real long-form videos; campaign pipeline
+C1–C9 (first real campaign run 15 Oct); Claude as the LLM with Groq fallback; AI on-screen text +
+captions; live-progress UI; **474 tests green** + Playwright browser tests (§8).
 **Purpose:** single source of truth for the agent maintaining this project — what it does, how
 every part works, where things live, what is verified and what is not. Open problems live in
 **`OPEN_ISSUES.md`**; history in §9 and `implementation_plan.md`.
 
 > **Built — campaign pipeline (C1–C8 ✅, 10 Oct 2026):** data model (`db/migration_v7.sql`, `db/repositories/campaign_repo.py` + `job_repo.py`), `campaign/service.py` (campaigns, assets, recipes), `campaign/recipe.py` + `presets.py` + `brief_parser.py`, compositor `pipeline/compositor.py`, `campaign/edit_mode.py`, `campaign/clip_mode.py`, `campaign/jobs.py` (router, runner, worker), `campaign/qa.py`, `campaign/delivery.py`, CLI `campaign/cli.py` (`python main.py campaign …` / `job …`), UI `campaign_ui.py` (tabs 1–4 of `ui.py`). Tests `test_campaigns.py`, `test_recipe.py`, `test_compositor.py`, `test_edit_mode.py`, `test_jobs.py`, `test_qa.py`, `test_campaign_ui.py` (suite 403). Details + progress log: `CAMPAIGN_PIPELINE_PLAN.md` §11.
 > **Docker (11 Oct 2026):** `Dockerfile` + `docker-compose.yml` (services `db` pgvector/pg16 on host 5433, volume `pgdata`; `app` UI :7862) + `docker/entrypoint.sh` (waits for the DB, runs `db/init_db.sh`); packages pinned in `requirements-docker.txt` (venv freeze minus torchcodec); runtime dirs + `models/` + `cache/` (HF/torch) + `media/` (local videos → `/app/media/…`) are bind-mounted. 403 tests pass inside the container. The old native `viral-clips-db` container is stopped (data migrated into compose `db`). QA loudness now uses loudnorm's measurement (ebur128 framelog=quiet reports 0 on ffmpeg 5.1).
-> **Next:** a browser pass through the campaign UI (`OPEN_ISSUES.md` 5.1) and real campaign trials; then the fix roadmap for open HIGH/MEDIUM issues: `OPEN_ISSUES.md` §0 (parked by the user).
+> **15–16 Oct 2026 (v5.1–5.3):** Claude primary LLM (§5.11); first real campaign run and its fixes (Gradio 6 dropdown preselection, review navigation, OOM on the 4 GB Docker VM, outline-cache filler clips); `campaign/onscreen_text.py` (AI line + caption per clip), `campaign/activity.py` (live feed), one file per output format, text styles + bundled Montserrat (`assets/fonts`), UI rework (§5.9). User guide: `workflow.md`. Tests: `test_ui_fixes.py`, `test_progress_ui.py`, `test_review_integration.py`, `test_ui_e2e.py` (browser).
+> **Next:** measure AI-line quality across campaigns (`OPEN_ISSUES.md` 5.4), montage-style edits (not supported), then the fix roadmap for open HIGH/MEDIUM issues: `OPEN_ISSUES.md` §0.
 
 ---
 
@@ -67,7 +68,10 @@ reject" intentionally return fewer.
 senna-dev/
 ├── main.py                 # orchestrator: run_pipeline() (11 stages, resume, run log, keep-awake),
 │                           # render_clips(), reset_from_stage(), STAGES, CLI
-├── ui.py                   # Gradio (port 7862): Generate + Review & Correct tabs (untested since v4.5)
+├── ui.py                   # Gradio (port 7862): status banner, campaign tabs 1–4 (campaign_ui.py),
+│                           # Quick clips, Fix a clip (advanced); browser-tested (test_ui_e2e.py)
+├── campaign_ui.py          # Set up campaign, Start a job, Progress, Review & download (§5.9)
+├── workflow.md             # user guide for the UI and editing
 ├── rerun_from_embed.py     # thin wrapper: run_pipeline(video_id=…, from_stage=…) + decision table
 ├── topup_clips.py          # surgical deterministic top-up + similarity/refine/render for a video_id
 ├── validate_fullscreen.py  # re-render + render checks + crop-debug previews for a video_id
@@ -77,13 +81,16 @@ senna-dev/
 ├── config.yaml             # SOURCE OF TRUTH for all tunables (§7)
 ├── config.py               # env + yaml merge (whitelisted top-level keys!), ffmpeg/ffprobe resolvers
 ├── logger.py               # setup_logging, bind(), log_stage(), run_log() (per-run log files)
-├── conftest.py, test_*.py  # pytest suite, 300 tests (§8)
+├── conftest.py, test_*.py  # pytest suite, 474 tests (§8); test_ui_e2e.py = Playwright (host)
 ├── AGENT_CONTEXT.md        # this file      ├── OPEN_ISSUES.md     # open problems, prioritised
 ├── README.md               # user-facing setup/usage   ├── explanation.md   # beginner explainer
 ├── implementation_plan.md  # build history (phases)    ├── .env.example / .github/workflows/ci.yml
 │
 ├── input/input_handler.py  # any source → local file; download cache; H.264 ≤1080p; 403 retry
-├── campaign/               # campaign_parser.py (LLM → JSON config) + templates/*.json
+├── campaign/               # campaign pipeline: service, recipe, presets, brief_parser, jobs,
+│                           # edit_mode, clip_mode, qa, delivery (+reexport_job), cli,
+│                           # onscreen_text (AI line + caption), activity (live feed);
+│                           # legacy campaign_parser.py + templates/*.json
 ├── db/
 │   ├── init_db.sh          # extension + schema + migrations v4–v6 (idempotent; --docker <name>)
 │   ├── connection.py       # ThreadedConnectionPool + pgvector
@@ -98,14 +105,15 @@ senna-dev/
 │   ├── audio_events.py, audio_classifier.py (YAMNet optional, off)
 │   ├── outline.py, discovery.py, analyzer.py, fusion.py   # clip discovery (§5.5)
 │   ├── similarity.py, boundaries.py, fingerprints.py
-│   ├── llm_client.py       # key rotation, reasoning headroom, JSON mode, rate-limit waits (§5.11)
+│   ├── llm_client.py       # Claude first (Sonnet/Haiku), Groq fallback with key rotation (§5.11)
+│   ├── compositor.py       # campaign renderer: ops, text styles, balance_text, compose_all
 │   ├── clipper.py          # FFmpeg cut / concat
 │   ├── framing.py          # detection, tracking, cuts, virtual camera, layouts, render, debug (§6)
 │   ├── active_speaker.py   # lip motion, audio voicing, shot director (§6.5)
 │   ├── captions.py, regen_srt.py, glossary.py, editplan.py, polish.py, review.py
 │   ├── fast_burn.py, improvements.py   # legacy render fallbacks (export.consolidated: false)
 │   └── speakers.py, diarization.py, visual.py   # optional adapters, default off
-├── assets/                 # logos/, music/ (empty by default)
+├── assets/                 # logos/, music/, fonts/ (bundled Montserrat ExtraBold/Black, OFL)
 ├── models/                 # embedding model, YuNet face model (git-ignored)
 ├── downloads/              # cached source videos  <source-key>.mp4   (generated, git-ignored)
 ├── work/                   # per-video intermediates                  (generated, git-ignored)
@@ -498,6 +506,14 @@ service — **never run yet** (repo not pushed).
 - **v4.6 (second real run):** H.264 ≤1080p downloads, stitched total cap, never-seen-subject
   crash fix, split-screen concurrency/overlap guards, motion-weighted densest-window saliency,
   crowd gaps follow saliency, framing audit tool.
+- **v5.0 (10–11 Oct):** campaign pipeline C1–C8 (recipe, compositor, edit/clip modes, jobs, QA,
+  delivery, 4 UI tabs); Docker compose; 403 tests.
+- **v5.1 (15 Oct):** Claude primary LLM (Sonnet 5.5 discovery/analyzer, Haiku 5.5 rest), Groq
+  fallback.
+- **v5.2 (15 Oct, first real campaign run):** dropdown preselection fix, review navigation +
+  auto-advance, AI `{auto}` on-screen text, face-safe text, OOM fixes, outline-method cache fix.
+- **v5.3 (16 Oct):** UI rework + live progress/activity feed; one file per format; text styles +
+  Montserrat + balanced lines + highlights; AI captions with the brief's tags; re-export; 474 tests.
 
 ---
 

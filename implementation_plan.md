@@ -1,6 +1,6 @@
 # Implementation Plan — Completion Log (all phases done)
 
-> Synced 10 Oct 2026. The original MiniMax-era phase list (input → campaign → dynamic pipeline → config → UI → testing) is long finished. What follows is the actual build history: **Phase 0 baseline repairs + Phases 1–8** (11-stage pipeline, Groq LLM + local embeddings), then **Phases 9–14** (OpusClip-style framing A–D, per-video workspaces/resume, and two real end-to-end runs on MrBeast videos), then **Phase 15** — the campaign pipeline C1–C8 (403 tests). Keep this file as history; `AGENT_CONTEXT.md` is the live spec.
+> Synced 18 Oct 2026. The original MiniMax-era phase list (input → campaign → dynamic pipeline → config → UI → testing) is long finished. What follows is the actual build history: **Phase 0 baseline repairs + Phases 1–8** (11-stage pipeline, Groq LLM + local embeddings), then **Phases 9–14** (OpusClip-style framing A–D, per-video workspaces/resume, and two real end-to-end runs on MrBeast videos), then **Phase 15** — the campaign pipeline C1–C8 (403 tests), then **Phases 16–18** — Claude as the LLM, the first real-campaign run and its fixes, and the UX / output rework (474 tests + browser E2E). Keep this file as history; `AGENT_CONTEXT.md` is the live spec.
 
 ## Phase 0 — Baseline: repairs + first verified e2e ✅
 - Verified the real 11-stage execution path; applied migration v4 (never applied).
@@ -67,14 +67,28 @@
 - Campaigns + asset library + jobs/deliverables (migration v7), versioned edit recipe + LLM brief parser with questions and deterministic guards, recipe compositor (`pipeline/compositor.py`), edit mode, clip mode on the existing pipeline, router + background worker + CLI, QA on every file, manifest / posting text / zip, 4 campaign UI tabs, C8 ops (speed, colour, watermark, intro, outro, end card) + variants.
 - Real runs: edit-mode samples from real footage (incl. all C8 ops × 2 hook versions) and clip mode on the MrBeast video — all QA checks pass. Bugs they found (vertical→16:9 strip crop, CTA over captions, stale standalone render reused, relative bookend paths, LLM filename pattern / invented text) are fixed. Full log: `CAMPAIGN_PIPELINE_PLAN.md` §11.
 
-## Verification state (10 Oct 2026) ✅
-- **403 pytest pass** (300 at the end of Phase 14) (`.venv/bin/python -m pytest -q`; DB round-trip tests use the Docker DB).
-- Real end-to-end runs: two MrBeast videos (above); resume (~2s for a finished video), `--from-stage refine`, selective re-render all exercised live. Media of both runs deleted after review; logs kept in `logs/`.
-- Not yet exercised: Gradio UI since the workspace refactor, CI test job, diarization/YAMNet, sit-down podcast footage. Full list: `OPEN_ISSUES.md`.
+## Phase 16 — Claude as the LLM ✅ (15 Oct 2026)
+- `pipeline/llm_client.py`: Claude first via the Anthropic SDK (Sonnet 5.5 for discovery + analyzer, Haiku 5.5 for every other call; `CLAUDE_*` env settings), Groq kept as automatic fallback (outage breaker, auth disable). Chat-completions shape preserved, so no call site changed. Docker image rebuilt; live Haiku/Sonnet calls and the Groq fallback verified in the container.
+
+## Phase 17 — First real campaign run + review fixes ✅ (15 Oct 2026)
+- A real run (Jimmy Kimmel / Mumford & Sons footage) exposed: Gradio 6 preselecting the first dropdown entry (the job ran on the "C8 Trial" demo campaign → ACME intro, fixed hook text), the u2 campaign stuck as a draft (empty on-screen text), edit mode on long videos keeping only a sponsor slate, unclickable review rows, no next/prev, approve/reject feedback off-screen, Clip review stuck on clip 1, double-clicked duplicate jobs.
+- Fixed all of the above; added AI-written on-screen text (`{auto}`, `campaign/onscreen_text.py`), face-safe text placement, OOM fixes for the 4 GB Docker VM (child-process transcription, embedding model released before framing), outline-cache method bug (filler clips) and the "HH:MM:SS" crash. Rerun of u2 on both videos: 14 clips, all QA pass.
+
+## Phase 18 — UX rework + output tuned for real briefs ✅ (16 Oct 2026)
+- UI: Set up campaign (steps A–D) → Start a job (summary, jumps to Progress) → Progress (status card, step checklist, live activity feed) → Review & download (row click, ◀ ▶, auto-advance, Approve all passing, Re-export all); status banner on every tab.
+- Output: one file per format (TikTok · Reels · Shorts share one 9:16 file; 42 → 14 files), TikTok-style white-box text in bundled Montserrat ExtraBold with balanced lines and *highlights*, AI post captions carrying the brief's required @tags / #hashtags / song, brief parser keeps `{auto}`. Checked against five real campaign briefs (Estevie, George Michael, Barbarians of California, De-Influenced, Cardi B — the last is a montage use case not covered).
+
+## Verification state (18 Oct 2026) ✅
+- **474 pytest pass** (403 after Phase 15) — run in the app container (`docker exec senna-dev-app-1 python -m pytest -q`), plus `test_ui_e2e.py` (Playwright, 4 browser tests against the running app).
+- Real runs: u2 campaign on two Kimmel videos (13 + 1 clips, 14 files, all QA pass, re-exported with the new style). Earlier: two MrBeast videos, resume, `--from-stage`, selective re-render.
+- Not yet exercised: CI test job, diarization/YAMNet, a full campaign on music-performance footage. Full list: `OPEN_ISSUES.md`.
+
+## Verification state (10 Oct 2026)
+- 403 pytest pass; two MrBeast end-to-end runs.
 
 ## Earlier verification (≤ 06 Oct 2026)
 - 220/220 tests; three e2e runs on a 324s DIY sample (3 clips, render 406s) and one 58-min run (25 clips, 23 finals). Evidence folders referenced then (`output/phase0|…`, `output/previews/`) are not part of this checkout.
 - Also fixed then: MediaPipe `mp.Image` move, campaign 429 crash, 283s spans, 120s stitch, ASS path/config bugs.
 
 ## Earlier history (original plan, all done)
-- Phase 1 (input handling), Phase 2 (campaign parser + templates), Phase 3 (dynamic pipeline logic), Phase 4 (config + assets), Phase 5 (Gradio UI), Phase 6 (integration testing) — all implemented; superseded and extended by Phases 0–7 above. Provider migrated MiniMax → NVIDIA NIM → **Groq + local embeddings** (current).
+- Phase 1 (input handling), Phase 2 (campaign parser + templates), Phase 3 (dynamic pipeline logic), Phase 4 (config + assets), Phase 5 (Gradio UI), Phase 6 (integration testing) — all implemented; superseded and extended by Phases 0–7 above. Provider migrated MiniMax → NVIDIA NIM → Groq + local embeddings → **Claude (Groq fallback) + local embeddings** (current, Phase 16).

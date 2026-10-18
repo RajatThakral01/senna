@@ -4,7 +4,8 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15%2B%20%7C%20pgvector-336791.svg)](https://github.com/pgvector/pgvector)
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-5.0%2B-007808.svg)](https://ffmpeg.org/)
-[![Groq](https://img.shields.io/badge/Groq-LLM%20API-orange.svg)](https://console.groq.com)
+[![Claude](https://img.shields.io/badge/Claude-Sonnet%205.5%20%7C%20Haiku%205.5-D97757.svg)](https://www.anthropic.com/api)
+[![Groq](https://img.shields.io/badge/Groq-fallback-orange.svg)](https://console.groq.com)
 
 **Viral Clips Automator** is an end-to-end autonomous AI pipeline that transforms long-form videos (podcasts, interviews, streams, webinars) into high-performing 9:16 vertical short-form viral clips optimized for **TikTok**, **Instagram Reels**, and **YouTube Shorts**.
 
@@ -12,7 +13,7 @@ Built with **Claude** (Sonnet 5.5 for discovery/analysis, Haiku 5.5 for every ot
 
 Verified end-to-end on real long-form footage: a 58-minute video → 14 clips and a 27-minute video → 13 clips (64 minutes end to end on an 8 GB M-series Mac, CPU only).
 
-It is also a **campaign tool for clipping campaigns**: give it a campaign brief + assets, then either a long video to cut into clips or a batch of short videos to modify (replace audio, logo, captions, text, reframe, intro/outro, variants…). Every output is QA-checked and delivered as a zip with posting text — see **Usage → Option A / C** and `CAMPAIGN_PIPELINE_PLAN.md`.
+It is also a **campaign tool for clipping campaigns**: give it a campaign brief + assets, then either a long video to cut into clips or a batch of short videos to modify (replace audio, logo, captions, text, reframe, intro/outro, variants…). For each clip the AI writes the **on-screen text** (following the brief's rules and example lines) and a **ready-to-paste caption** with the brief's required @tags / #hashtags / song. Each clip becomes **one file posted to TikTok · Reels · Shorts**, is QA-checked and delivered as a zip with posting text — see **Usage → Option A / C**, [`workflow.md`](workflow.md) and `CAMPAIGN_PIPELINE_PLAN.md`.
 
 ---
 
@@ -50,7 +51,7 @@ It is also a **campaign tool for clipping campaigns**: give it a campaign brief 
 flowchart TD
     A[Video Source: YouTube / Drive / Local] --> B[1. Input Normalization]
     B --> C[(PostgreSQL Video Record)]
-    B --> D[2. Campaign Parsing - Groq LLM]
+    B --> D[2. Campaign Parsing - Claude LLM]
     D --> E[3. WhisperX Transcription]
     E --> F[work/<video>/transcript.json]
     F --> G[4. Semantic Silence Chunker]
@@ -122,7 +123,8 @@ docker compose down                                  # stop (data is kept)
 - **Services:** `db` (pgvector/pg16, data in the `pgdata` volume, published on `localhost:5433`) and `app` (Gradio UI on `7862` + background job worker + CLI). The app applies the schema and migrations on every start (idempotent).
 - **Mounted from this folder** (so files survive rebuilds and you can open them directly): `downloads/`, `output/` (deliverables in `output/campaigns/…`), `work/`, `logs/`, `models/` (Qwen3 embedding + YuNet — must exist, see Prerequisites), `assets/`, `cache/` (Whisper/alignment model downloads) and **`media/`** — drop local videos there and use `/app/media/<file>` (or `/app/media/` for the whole folder) in **New job**. Links and UI uploads work as usual.
 - **Memory:** Docker Desktop's default ~4 GB is enough for edit-mode jobs (peak 2.9 GB measured); long videos in clip mode (transcription + embeddings + rendering) need more — set **Docker Desktop → Settings → Resources → Memory to 6 GB+**.
-- Captions use Liberation Sans in the container (metric-compatible with Arial). torchcodec is left out of the image (no linux-arm64 wheel; unused).
+- On-screen text and captions use the bundled **Montserrat ExtraBold** (`assets/fonts/`, OFL licence, mounted with `assets/`); Liberation Sans is the system fallback. torchcodec is left out of the image (no linux-arm64 wheel; unused).
+- Docker Desktop's VM has 4 GB here: transcription runs in a child process and the embedding model is released before framing so long videos fit. Giving Docker 6 GB adds headroom.
 
 ## 🚀 Quickstart & Setup (native)
 
@@ -201,14 +203,14 @@ DB_PASSWORD=postgres
 ```bash
 python ui.py
 ```
-Open `http://localhost:7862`. The UI is campaign-first:
+Open `http://localhost:7862`. The UI is campaign-first. A **live status banner** above every tab shows what is running (percentage, current step, "active N s ago"). Full walkthrough: [`workflow.md`](workflow.md).
 
-1. **Campaigns** — create a campaign, paste the client's brief, upload its assets (logos, audio, fonts, intro/outro videos, images), **Parse brief** → the edit recipe in plain English + any questions, edit the JSON if needed, **Save recipe**.
-2. **New job** — pick the campaign, paste links / file paths / folders or upload videos, **Check inputs** (duration, aspect, auto mode: long videos are cut into clips, short ones edited; override per input), **Run job**.
-3. **Jobs** — live progress, per-input errors, cancel, resume / retry failed inputs.
-4. **Review & deliver** — every deliverable with its compliance checklist (duration, size, codecs, loudness, audio replaced, logo present, text drawn), posting text, approve / reject, re-render one file with a tweaked recipe, download a zip (+ `manifest.json`, `posting.txt`).
-5. **Quick clips** — the original one-off generator (URL + campaign text → clips).
-6. **Clip review** — fix boundaries / layouts / captions of a clipped video and re-render single clips.
+1. **Set up campaign**: (A) name + the client's brief + platforms, (B) brand files (logos, audio, fonts, intro/outro), (C) **Read the brief** → the edit steps in plain English, (D) answer open questions → **Save edit steps** (JSON editor under "Advanced").
+2. **Start a job**: pick the campaign (nothing is preselected; a summary shows exactly what will be done), paste links / paths / folders or upload videos, **Run job** → you land on Progress. Drafts and duplicate jobs are refused; a long video in edit mode gets a warning.
+3. **Progress**: status card (progress bar, step checklist with counters like "framing clip 4/13", elapsed time) + a plain-language activity feed, so long steps never look frozen. Cancel / resume / **Open in Review**.
+4. **Review & download**: click a row or use ◀ / ▶, watch, **Approve / Reject** (auto-advances), quality checks, posting text (AI caption), tweak one file and re-render, **Approve all that passed QA**, build the zip (+ `manifest.json`, `posting.txt`), or **Re-export all files** with the campaign's current settings.
+5. **Quick clips (no campaign)**: the original one-off generator (URL + campaign text → clips).
+6. **Fix a clip (advanced)**: pick a recent video, open a clip (row click / ◀ ▶), fix boundaries / layout / crop / caption words, re-render that clip.
 
 ### Option B: Run via CLI
 
@@ -243,7 +245,7 @@ python main.py job run --campaign acme-summer --input https://youtu.be/… --inp
 python main.py job status [<job>]        # job resume <job> re-runs unfinished inputs
 ```
 
-Deliverables land in `output/campaigns/<campaign>/<job8>/` (one file per input × clip × variant × platform). Recipe ops: trim, reframe, audio replace / add music (ducked) / mute / volume, logo, captions, text overlays (hook / CTA / handle / disclaimer), watermark, intro, outro, end card, speed, colour, plus **variants** (e.g. two hooks). See `CAMPAIGN_PIPELINE_PLAN.md`.
+Deliverables land in `output/campaigns/<campaign>/<job8>/`: one file per input × clip × variant × **format**. TikTok, Reels and Shorts share one 9:16 file (`…_tiktok-reels-shorts.mp4`, checked against the strictest limit); 16:9 YouTube gets its own. Recipe ops: trim, reframe, audio replace / add music (ducked) / mute / volume, logo, captions, text overlays (hook / CTA / handle / disclaimer), watermark, intro, outro, end card, speed, colour, plus **variants** (e.g. two hooks). See `CAMPAIGN_PIPELINE_PLAN.md`.
 
 ### Option D: Re-run an existing video from a stage
 
@@ -258,8 +260,9 @@ python rerun_from_embed.py <video_id> --from-stage refine   # default: audio_eve
 ```text
 viral-clips/
 ├── main.py                    # Orchestrator — run_pipeline() (11 stages, resume) + render_clips()
-├── ui.py                      # Gradio Web UI (port 7862): 4 campaign tabs + Quick clips + Clip review
-├── campaign_ui.py             # Campaign tabs: Campaigns, New job, Jobs, Review & deliver
+├── ui.py                      # Gradio Web UI (port 7862): status banner, 4 campaign tabs + Quick clips + Fix a clip
+├── campaign_ui.py             # Campaign tabs: Set up campaign, Start a job, Progress, Review & download
+├── workflow.md                # User guide: how to use the UI and edit videos
 ├── rerun_from_embed.py        # Re-run an existing video from a stage
 ├── topup_clips.py / validate_fullscreen.py / preview_framing.py   # maintenance & verification
 ├── tools/framing_audit.py     # Measure framing quality of a rendered video
@@ -320,7 +323,7 @@ fades: {video: true, audio: false}   # speech is never faded
 
 ## 🗺️ Roadmap
 
-Next: a campaign-first workflow — campaign brief + assets → clip a long video **or** apply the campaign's edits (audio, logo, text, captions, reframe) to supplied short videos, with compliance checks. See [CAMPAIGN_PIPELINE_PLAN.md](CAMPAIGN_PIPELINE_PLAN.md).
+Done: the campaign-first workflow (brief → recipe → jobs → QA → zip), Claude as the LLM, AI on-screen text + captions, live progress UI. Next candidates: beat-synced montage edits from several sources (e.g. sports edits to a song), per-post sound/song handling, measured quality of the AI lines across campaigns. See [OPEN_ISSUES.md](OPEN_ISSUES.md) and [CAMPAIGN_PIPELINE_PLAN.md](CAMPAIGN_PIPELINE_PLAN.md).
 
 ## 🐞 Known Issues
 
@@ -328,11 +331,11 @@ See [OPEN_ISSUES.md](OPEN_ISSUES.md). To measure framing quality on a rendered v
 
 ## 🧪 Tests
 
-403 green (`.venv/bin/python -m pytest -q`, ~3.5 min — the campaign tests render real video with ffmpeg). LLM/network calls are mocked; the repository round-trip tests need the database running. `validate_fullscreen.py <video_id>` checks real renders (dims, audio, duration, fill scan, crop-debug previews); `tools/framing_audit.py <video_id>` measures framing quality.
+474 green (run inside the app container, which reaches the DB: `docker exec senna-dev-app-1 python -m pytest -q`, ~3.5 min — campaign tests render real video with ffmpeg). LLM/network calls are mocked; the repository round-trip tests need the database. Browser automation: `test_ui_e2e.py` (Playwright, run on the host against the running app: `E2E_URL=http://localhost:7862 pytest -q test_ui_e2e.py`; skips without it). `validate_fullscreen.py <video_id>` checks real renders (dims, audio, duration, fill scan, crop-debug previews); `tools/framing_audit.py <video_id>` measures framing quality.
 
 ## ⏱️ Performance (8 GB M-series Mac, CPU only)
 
-27-minute 1080p video → 13 clips in ~64 minutes: download ~1 min, transcription ~4.5 min (`small`), LLM stages ~5 min (free-tier Groq, waits included), rendering ~50 min (13 clips, face framing + debug video). Rendering is the slow part; see OPEN_ISSUES §4.
+27-minute 1080p video → 13 clips in ~64 minutes: download ~1 min, transcription ~4.5 min (`small`), LLM stages ~5 min (measured on free-tier Groq with rate-limit waits; Claude has no such waits), rendering ~50 min (13 clips, face framing + debug video). Rendering is the slow part; see OPEN_ISSUES §4.
 
 ---
 

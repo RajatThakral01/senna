@@ -1,6 +1,6 @@
 # Campaign Pipeline — Implementation Plan
 
-Status: **in progress** — **all phases C1–C8 ✅ (10 Oct 2026)**; open items in `OPEN_ISSUES.md` (1.10–1.13, 5.1). Builds on the existing clip pipeline
+Status: **all phases C1–C8 ✅ (10 Oct 2026)**, plus **C9 ✅ (15–16 Oct 2026)**: first real campaign run, AI on-screen text + captions, one file per format, UX rework (§11). Open items in `OPEN_ISSUES.md` (1.10–1.13, 5.1, 5.4). User guide: `workflow.md`. Builds on the existing clip pipeline
 (`AGENT_CONTEXT.md`); open quality issues of the clip pipeline are tracked in `OPEN_ISSUES.md`.
 
 ## 1. Goal
@@ -150,11 +150,13 @@ without touching the pipeline.
 
 | Tab | Contents |
 |---|---|
-| **1. Campaigns** | list + create/edit: name, brief text, upload assets (logos, audio, fonts, intro/outro), platform targets, output rules → "Parse brief" → recipe shown as an editable form + JSON, with the parser's **questions** to answer → save |
-| **2. New job** | pick campaign → add inputs (paste links, upload one or many files, or a folder path) → each input shows its probe (duration, aspect) and auto-chosen mode (clip/edit, overridable) → for clip mode: number of clips / clip length → **Run** |
-| **3. Jobs** | queue with status/progress per input, live log tail, cancel / resume |
-| **4. Review & deliver** | grid of deliverables with player, compliance checklist, recipe tweaks per deliverable (e.g. move the logo) → re-render just that one → approve → **download zip** (+ captions/titles/hashtags text for posting) |
-| **5. Clip review** | today's Review & Correct tab (boundaries, layout, captions) for clip-mode outputs |
+| **1. Set up campaign** | A name + brief + platforms → B brand files → C "Read the brief" → edit steps in plain English → D answer questions → save (JSON under "Advanced") |
+| **2. Start a job** | pick campaign (no preselection; summary of every edit step, drafts blocked) → links / files / folders → optional mode check → **Run job** → jumps to Progress; duplicate jobs refused |
+| **3. Progress** | status card (bar, step checklist with clip counters, elapsed, last activity) + plain-language activity feed (`campaign/activity.py`), cancel / resume, Open in Review |
+| **4. Review & download** | table (click a row / ◀ ▶), player, quality checks, AI posting text, per-file recipe tweak → re-render, approve / reject with auto-advance, Approve all passing, zip, Re-export all |
+| **Fix a clip (advanced)** | the Review & Correct tool (boundaries, layout, crop, captions) for clip-mode outputs, with a recent-video picker |
+
+A status banner above every tab shows running jobs (step, %, last activity).
 
 CLI equivalents: `main.py campaign create --brief … --assets …`, `main.py job run --campaign X
 --input a.mp4 --input https://…`, `main.py job status`.
@@ -179,7 +181,7 @@ framing phases.
 
 1. **Must-have operations** — is the P1 list in §4 right for your first campaigns? Anything missing
    (e.g. green-screen, subtitles in another language, removing original captions/watermarks)?
-2. **Platforms** — which ones, and do you need one output per platform or one universal 9:16 file?
+2. **Platforms** — which ones, and do you need one output per platform or one universal 9:16 file? *(Answered 16 Oct: one 9:16 file for TikTok · Reels · Shorts.)*
 3. **Original speech when replacing audio** — usually removed, or kept under the new track?
 4. **Text overlays** — what kinds do campaigns ask for (hooks, CTA, @handle, disclaimers)? Any brand fonts?
 5. **Variants** — do campaigns pay per video so you'd want several variants of each input?
@@ -190,7 +192,7 @@ framing phases.
 **Defaults used (§10 unanswered):** P1 op list as in §4; platforms TikTok / Reels / Shorts (+ generic,
 YouTube, X, Facebook presets), one universal 9:16 file unless the brief names platforms; replacing
 audio removes the original voice by default and the parser asks to confirm; generic text roles
-(hook / cta / handle / disclaimer), Arial unless a campaign font is uploaded; variants in C8; Gradio UI.
+(hook / cta / handle / disclaimer), Arial unless a campaign font is uploaded (since 16 Oct: bundled Montserrat ExtraBold); variants in C8; Gradio UI.
 
 **C1 — data model ✅** `db/migration_v7.sql` (campaigns, campaign_assets, jobs, job_inputs,
 deliverables; applied by `db/init_db.sh`), `db/repositories/campaign_repo.py` (campaigns, recipe
@@ -325,3 +327,20 @@ intro / end-card pieces were written to a relative path while ffmpeg ran inside 
 pattern produced `…_tiktok_tiktok.mp4`. After the fixes: 4 files, durations exact
 (15 s ÷ 1.1 + 1.5 s intro + 2 s end card = 17.2 s), every QA check passes. Tests: C8 cases in
 `test_compositor.py`, `test_recipe.py`, `test_edit_mode.py`. Suite: 403 passed.
+
+
+**C9 — real campaigns ✅ (15–16 Oct 2026)** First real run (u2 brief on two Jimmy Kimmel /
+Mumford & Sons videos) and five real briefs (Estevie, George Michael, Barbarians of
+California, De-Influenced, Cardi B) drove these changes:
+- `{auto}` on-screen text written per clip by the LLM (`campaign/onscreen_text.py`): brief
+  rules + example groups, variety across clips, `clips.focus` beats names in a reused brief,
+  *highlights*, ≤ 80 chars. One call also writes the post caption with the brief's required
+  @tags / #hashtags / song; captions are written even without `{auto}`. Parser rule 14 + the
+  grounding filter keep `{auto}`.
+- One deliverable per output format (`compose_all` groups by aspect; platform
+  `tiktok+reels+shorts`, strictest limits). `delivery.reexport_job` rebuilds old jobs.
+- Text styles box (default) / clean / dark_box, Montserrat ExtraBold, `balance_text`,
+  face-safe placement (`avoid_faces`).
+- UI rework (table above) + live progress; Gradio 6 dropdown preselection fixed.
+- Not covered: beat-synced montage edits across many source videos (the Cardi B sports-edit
+  brief) and attaching platform sounds — posting text names the sound/song instead.
