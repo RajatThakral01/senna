@@ -363,6 +363,9 @@ def render_clips(video_id: str, raw_video_path: str = None,
                         clip_repo.mark_segments_stitched(c["id"])
 
                 for i, clip in enumerate(clips):
+                    if progress:
+                        progress(0.85 + 0.15 * i / max(1, len(clips)),
+                                 desc=f"framing clip {i + 1}/{len(clips)}")
                     n = clip['clip_number']
                     clog = bind("main", video_id=video_id, stage="render", clip_number=n)
                     final_path = ws.final(n)

@@ -83,6 +83,10 @@ Rules:
 13. Intro / outro / end card need a video or image asset (or end-card text); speed 0.5–2.0;
     color presets vivid|warm|cool|bw; watermark = small translucent text. An end card with
     only text is fine — don't ask for an image unless the brief mentions one.
+14. On-screen text the creator must WRITE per post ("text on screen is required", "write your
+    own", "get creative", example lines to imitate but not copy) -> ONE text_overlay with
+    text "{auto}" and role "hook": the tool writes a fresh line per clip from this brief. Only
+    use a literal text when the brief gives the exact words to show. Never ask what it says.
 """
 
 
@@ -290,6 +294,9 @@ def _fill_gaps(raw, kw) -> list:
                 kept.append(o)
                 continue
             t = norm(o.get("text"))
+            if str(o.get("text") or "").strip() == "{auto}":
+                kept.append(o)            # AI-written per clip (rule 14), never grounded
+                continue
             if t and brief_n and t not in brief_n:
                 notes.append(f"{where}{o['op']} text {o.get('text')!r} dropped — it is not in "
                              "the brief")

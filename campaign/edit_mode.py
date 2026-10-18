@@ -117,7 +117,7 @@ def transcribe_input(path, work_dir):
 
 # ── core ─────────────────────────────────────────────────────────────────────
 
-def render_input(path, recipe, out_dir, work_dir, basename, progress=None) -> dict:
+def render_input(path, recipe, out_dir, work_dir, basename, progress=None, brief=None) -> dict:
     """Render one supplied video for every export platform (no DB).
 
     Returns {probe, results: [compose report per platform], warnings, elapsed}.
@@ -147,12 +147,23 @@ def render_input(path, recipe, out_dir, work_dir, basename, progress=None) -> di
     if progress:
         progress("rendering", 0.3)
     results = []
+    from campaign.onscreen_text import resolve_auto_text, segments_text
+    texts_so_far = []
     for vname, vrec in variants:
+        caps = []
+        vrec, used, w = resolve_auto_text(vrec, brief, segments_text(segs), avoid=texts_so_far,
+                                          focus=((recipe.get("clips") or {}).get("focus")),
+                                          captions=caps)
+        texts_so_far += used
+        warnings += w
         part = compose_all(path, vrec, out_dir, variant_basename(basename, vname),
                            work_dir=work_dir if vname == "main" else os.path.join(work_dir, vname),
                            transcript_segments=segs)
         for r in part:
             r["compose_input"], r["variant"] = path, vname
+            r["onscreen_text"] = used
+            if caps:
+                r["post"] = {"caption": caps[0]}
         results += part
     return {"probe": info, "results": results, "warnings": warnings,
             "elapsed": round(time.monotonic() - t0, 1)}
@@ -162,7 +173,7 @@ def qa_report(res: dict) -> dict:
     """The compose report fields worth keeping on the deliverable row."""
     keys = ("width", "height", "duration", "expected_duration", "source_start", "framing",
             "applied", "skipped", "warnings", "cut", "elapsed", "reused", "compose_input",
-            "body_offset", "body_duration")
+            "body_offset", "body_duration", "onscreen_text", "post")
     return {k: res.get(k) for k in keys if k in res}
 
 
@@ -182,7 +193,8 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
         base = output_basename((recipe.get("output") or {}).get("filename")
                                or "{campaign}_{input}_{clip}_{platform}",
                                campaign["slug"], label, clip="01", n=inp["idx"] + 1)
-        rep = render_input(path, recipe, out_dir, work_dir, base, progress=progress)
+        rep = render_input(path, recipe, out_dir, work_dir, base, progress=progress,
+                           brief=campaign.get("brief"))
         job_repo.delete_deliverables(inp["id"])
         rows = []
         for r in rep["results"]:

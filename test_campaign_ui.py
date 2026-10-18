@@ -76,7 +76,7 @@ def test_full_flow(env):
     q, inputs, md = U.refresh_jobs(job_id)
     assert inputs[0][1] == "done" and "**done**" in md
     table = U.deliverables_table(job_id)
-    assert table[0][2] == "tiktok / main" and "pass" in table[0][4]
+    assert table[0][2] == "TikTok" and "pass" in table[0][4]
     video, checks, post, rjson, st = U.show_deliverable(job_id, 1)
     assert os.path.isfile(video) and "Shop now" in post and "#acme" in post
     assert all(c[0] == "✅" for c in checks), checks

@@ -47,6 +47,27 @@ def output_size(aspect: str) -> tuple:
     return ASPECT_SIZES.get(aspect, ASPECT_SIZES["9:16"])
 
 
+def split_platforms(platform: str) -> list:
+    """"tiktok+reels+shorts" → ["tiktok", "reels", "shorts"] (unknown names dropped)."""
+    names = [normalize_platform(x) for x in str(platform or "").split("+")]
+    return [n for n in dict.fromkeys(names) if n] or ["generic"]
+
+
+def platform_label(platform: str) -> str:
+    """"tiktok+reels+shorts" → "TikTok · Reels · Shorts"."""
+    short = {"reels": "Reels", "shorts": "Shorts", "facebook": "Facebook", "x": "X"}
+    names = split_platforms(platform)
+    if len(names) == 1:
+        return PLATFORMS[names[0]]["label"]
+    return " · ".join(short.get(n, PLATFORMS[n]["label"]) for n in names)
+
+
 def preset(platform: str) -> dict:
-    p = PLATFORMS.get(normalize_platform(platform) or "generic")
-    return {**ENCODING, **p, "platform": normalize_platform(platform) or "generic"}
+    """Export preset. A combined platform ("tiktok+reels+shorts": one file posted to
+    all of them) gets the STRICTEST limits of its members."""
+    names = split_platforms(platform)
+    ps = [PLATFORMS[n] for n in names]
+    merged = dict(ps[0], label=platform_label(platform),
+                  max_duration=min(p["max_duration"] for p in ps),
+                  max_size_mb=min(p["max_size_mb"] for p in ps))
+    return {**ENCODING, **merged, "platform": "+".join(names)}

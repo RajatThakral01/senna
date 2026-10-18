@@ -34,10 +34,14 @@ from pipeline import media
 
 log = get_logger("pipeline.compositor")
 
-DEFAULT_FONT_FAMILY = "Arial"
+# bundled, OFL-licensed (assets/fonts/OFL.txt): the heavy geometric sans used on most
+# clipping edits; libass falls back to the system sans if the files are missing
+DEFAULT_FONT_FAMILY = "Montserrat ExtraBold"
+BUILTIN_FONTS_DIR = os.path.join("assets", "fonts")
+HIGHLIGHT_COLOR = "#FFD84D"
 _FONT_DIRS = ("/System/Library/Fonts/Supplemental", "/Library/Fonts",
               "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts")
-ROLE_SIZE = {"hook": 78, "cta": 66, "handle": 48, "disclaimer": 36, "custom": 60}
+ROLE_SIZE = {"hook": 86, "cta": 72, "handle": 48, "disclaimer": 36, "custom": 72}
 ALIGN = {"top-left": 7, "top": 8, "top-center": 8, "top-right": 9, "center": 5,
          "bottom-left": 1, "bottom": 2, "bottom-center": 2, "bottom-right": 3}
 
@@ -135,6 +139,48 @@ def _static_crop(src_w, src_h, tgt_aspect, cx=None, cy=None, headroom=0.38):
     return cw, ch, x, y
 
 
+TOP_POSITIONS = ("top", "top-center", "top-left", "top-right")
+
+
+def face_safe_overlays(overlays, face_frac):
+    """Move top text that would sit on the main face to the lower part of the frame.
+
+    face_frac: the main face's median height in the OUTPUT frame (0 = top, 1 = bottom),
+    or None when no face was found. Wide talk-show shots cropped to 9:16 put heads at
+    ~20-45% of the height, exactly where top text goes (15 Oct run: the hook covered
+    Marcus's and Kimmel's faces). Overlays with avoid_faces=false are left alone.
+    Returns (overlays, moved_count)."""
+    if face_frac is None or face_frac >= 0.5:
+        return list(overlays), 0
+    out, moved = [], 0
+    for o in overlays:
+        if o.get("avoid_faces", True) and (o.get("position") or "") in TOP_POSITIONS:
+            o = dict(o, position="bottom")
+            moved += 1
+        out.append(o)
+    return out, moved
+
+
+def _face_frac(path, offset, dur, work, cfg, crop=None):
+    """Median face height (0..1) in the output frame, sampled from up to 20 s of the
+    framed source. crop=(y, h) when a static crop is applied afterwards."""
+    probe = os.path.join(work, "face_probe.mp4")
+    try:
+        _run([_ffmpeg(), "-y", "-ss", f"{offset:.3f}", "-t", f"{min(dur, 20):.3f}", "-i", path,
+              "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", probe],
+             what="face probe cut")
+        _, cy = _subject_center(probe, (cfg or {}).get("framing", {}))
+        if cy is None:
+            return None
+        if crop:
+            y, h = crop
+            return (cy - y) / h
+        return cy / media.probe(probe)["height"]
+    except Exception:
+        log.debug("face probe failed", exc_info=True)
+        return None
+
+
 def _subject_center(path, cfg):
     """Median position of the most prominent face in a clip, or (None, None)."""
     try:
@@ -155,6 +201,88 @@ def _subject_center(path, cfg):
 
 
 # ── ASS (captions + text overlays) ───────────────────────────────────────────
+
+def balance_text(text, max_chars, max_lines=3):
+    """Line breaks for on-screen text. Sentences start on their own line when that still
+    fits in max_lines; within a sentence: the fewest lines that fit max_chars, with line
+    lengths as even as possible (no lone last word). *highlight* markers don't count."""
+    sentences = [x for x in re.split(r"(?<=[.!?…])\s+", str(text or "").strip()) if x]
+    if len(sentences) > 1:
+        per = [_balance_one(x, max_chars) for x in sentences]
+        if sum(len(p) for p in per) <= max_lines:
+            return [ln for p in per for ln in p]
+    return _balance_one(text, max_chars)
+
+
+_GLUE = "\u00a0"
+
+
+def _balance_one(text, max_chars):
+    # a *highlighted phrase* is one unit: splitting it across lines left its markers
+    # unmatched and they showed as literal asterisks ("Cold-called *Chris / Stapleton*")
+    text = re.sub(r"\*[^*]+\*", lambda m: m.group(0).replace(" ", _GLUE), str(text or ""))
+    return [ln.replace(_GLUE, " ") for ln in _balance_words(text, max_chars)]
+
+
+def _balance_words(text, max_chars):
+    # split on plain spaces only: str.split() would also break at the glue (U+00A0)
+    words = [w for w in re.split(r"[ \t\n]+", str(text or "").strip()) if w]
+    if not words:
+        return []
+    n = max(1, -(-len(" ".join(words).replace("*", "")) // max(8, max_chars)))
+    while True:
+        best = None
+        # dynamic programming over break points: minimise the longest line
+        L = len(words)
+        cost = {(0, 0): (0, [])}
+        for k in range(1, n + 1):
+            for j in range(1, L + 1):
+                cands = []
+                for i in range(j):
+                    if (i, k - 1) in cost:
+                        line = " ".join(words[i:j]).replace("*", "")
+                        prev_max, br = cost[(i, k - 1)]
+                        # a line ending a sentence/clause reads better: small bonus
+                        eff = len(line) - (3 if j < L and line[-1] in ".!?…,:;" else 0)
+                        if len(line) > max_chars and j - i > 1:
+                            continue
+                        cands.append((max(prev_max, eff), br + [j]))
+                if cands:
+                    cost[(j, k)] = min(cands)
+        if (L, n) in cost:
+            best = cost[(L, n)]
+        if best and (best[0] <= max_chars or n >= L):
+            out, i = [], 0
+            for j in best[1]:
+                out.append(" ".join(words[i:j]))
+                i = j
+            return out
+        n += 1
+
+
+def _highlighted(line, color):
+    """'Came for *Kacey*' → ASS with the starred words in `color` (markers removed)."""
+    from pipeline.captions import ass_escape
+    parts = re.split(r"(\*[^*]+\*)", line)
+    out = []
+    for p in parts:
+        if p.startswith("*") and p.endswith("*") and len(p) > 2:
+            out.append("{\\c" + color + "}" + ass_escape(p[1:-1]) + "{\\r}")
+        else:
+            out.append(ass_escape(p))
+    return "".join(out)
+
+
+def _add_builtin_fonts(font_dir, fonts):
+    """Copy the bundled fonts next to the ASS so libass finds them (fontsdir)."""
+    if not os.path.isdir(BUILTIN_FONTS_DIR):
+        return
+    os.makedirs(font_dir, exist_ok=True)
+    for f in os.listdir(BUILTIN_FONTS_DIR):
+        if f.lower().endswith((".ttf", ".otf")):
+            shutil.copy2(os.path.join(BUILTIN_FONTS_DIR, f), font_dir)
+            fonts.setdefault(f"__builtin__{f}", DEFAULT_FONT_FAMILY)
+
 
 def _style(name, font, size, primary, secondary, outline_c, back_c, bold, border_style,
            outline, shadow, align, ml, mr, mv):
@@ -213,25 +341,57 @@ def build_overlay_ass(W, H, dur, cues=None, cap_op=None, overlays=(), fonts=None
             continue
         role = o.get("role") or "custom"
         fam = fonts.get(o.get("font")) or o.get("font") or DEFAULT_FONT_FAMILY
-        size = int(round((o.get("size") or ROLE_SIZE.get(role, 60)) * k))
         align = ALIGN.get(o.get("position") or "center", 5)
-        box = o.get("box", True)
-        mv = int(H * 0.10)
+        mv = int(H * (0.13 if W / H < 0.9 else 0.08))
         if align in (1, 2, 3):
             mv = max(int(H * (low - 0.04)), cap_top_from_bottom)
         a8 = int(round((1 - float(o["opacity"])) * 255)) if o.get("opacity") is not None else 0
-        styles.append(_style(f"T{i}", fam, size, ass_color(o.get("color") or "#FFFFFF", a8),
-                             ass_color(o.get("color") or "#FFFFFF", a8),
-                             f"&H{max(a8, 0):02X}000000",
-                             "&H59000000" if box else "&H00000000", True,
-                             3 if box else 1, int(round((14 if box else 4) * k)),
-                             0, align, int(W * 0.06), int(W * 0.06), mv))
+        raw = str(o["text"])
+        plain = raw.replace("*", "")
+        if role == "watermark":
+            style, size = "watermark", int(round((o.get("size") or 40) * k))
+        else:
+            style = o.get("style") or "box"
+            base = o.get("size") or ROLE_SIZE.get(role, 72)
+            # long lines get a smaller size so they stay at 2–3 lines
+            if not o.get("size") and len(plain) > 45:
+                base = int(base * 0.86)
+            size = int(round(base * k))
+        margin = int(W * 0.08)
+        white, black = ass_color("#FFFFFF", a8), ass_color("#000000", a8)
+        color = ass_color(o.get("color") or "#FFFFFF", a8)
+        if style == "box":
+            # TikTok "background" text: a white box hugging EACH line, black text
+            primary, outline_c, back_c, border, ol, sh = (
+                ass_color("#111111", a8) if not o.get("color") or o.get("color") == "#FFFFFF"
+                else color, white, "&H00000000", 3, int(round(16 * k)), 0)
+        elif style == "dark_box":
+            primary, outline_c, back_c, border, ol, sh = (
+                color, f"&H{max(a8, 0x40):02X}000000", "&H80000000", 3, int(round(22 * k)), 0)
+        elif style == "watermark":
+            primary, outline_c, back_c, border, ol, sh = (
+                color, f"&H{a8:02X}000000", "&H80000000", 1, int(round(3 * k)), 0)
+        else:
+            # clean: white, thick black outline + soft drop shadow (reads on any frame)
+            primary, outline_c, back_c, border, ol, sh = (
+                color, black, "&H96000000", 1, int(round(7 * k)), int(round(4 * k)))
+        styles.append(_style(f"T{i}", fam, size, primary, primary, outline_c, back_c, True,
+                             border, ol, sh, align, margin, margin, mv))
         anim = o.get("animation") or "fade"
         tag = ("{\\fad(250,250)}" if anim == "fade" else
                "{\\fscx70\\fscy70\\t(0,140,\\fscx108\\fscy108)\\t(140,240,\\fscx100\\fscy100)}"
                if anim == "pop" else "")
-        text = ass_escape(str(o["text"])).replace("\n", r"\N")
-        events.append(f"Dialogue: 1,{_ass_time(a)},{_ass_time(b)},T{i},,0,0,0,,{tag}{text}")
+        if role == "watermark":
+            body = ass_escape(plain)
+        else:
+            # balanced manual line breaks; measured Montserrat ExtraBold ≈ 0.45 em/char
+            max_chars = max(10, int((W - 2 * margin) / (size * 0.47)))
+            hl = ass_color(HIGHLIGHT_COLOR) if style != "box" else ass_color("#E8325A")
+            lines = []
+            for para in raw.split("\n"):
+                lines += balance_text(para, max_chars)
+            body = r"\N".join(_highlighted(ln, hl) for ln in lines)
+        events.append(f"Dialogue: 1,{_ass_time(a)},{_ass_time(b)},T{i},,0,0,0,,{tag}{body}")
     if not events:
         return None
     header = ("[Script Info]\nScriptType: v4.00+\n"
@@ -483,6 +643,7 @@ def compose(input_path, recipe, output_path, platform="generic", work_dir=None,
 
     # ── framing ──
     src_path, src_offset = input_path, start
+    crop_yh = None
     vf = []
     src_w, src_h = info["width"], info["height"]
     tgt = W / H
@@ -521,6 +682,7 @@ def compose(input_path, recipe, output_path, platform="generic", work_dir=None,
                       "-crf", "28", probe_seg], what="probe cut")
                 cx, cy = _subject_center(probe_seg, cfg.get("framing", {}))
             cw, ch, x, y = _static_crop(src_w, src_h, tgt, cx, cy)
+            crop_yh = (y, ch)
             vf.append(f"crop={cw}:{ch}:{x}:{y}")
             framing_kind = "face-centred crop" if cx is not None else "centre crop"
         if single.get("reframe"):
@@ -543,6 +705,7 @@ def compose(input_path, recipe, output_path, platform="generic", work_dir=None,
     cap_op = single.get("captions")
     cues = None
     fonts, font_dir = {}, os.path.join(work, "fonts")
+    _add_builtin_fonts(font_dir, fonts)
     for o in [cap_op] + overlays:
         if o and o.get("font_path") and os.path.isfile(o["font_path"]):
             os.makedirs(font_dir, exist_ok=True)
@@ -582,11 +745,20 @@ def compose(input_path, recipe, output_path, platform="generic", work_dir=None,
             except Exception as e:
                 log.exception("captions failed")
                 warnings.append(f"captions failed: {e}")
+    if framing_kind != "fit_blur" and any(
+            o.get("avoid_faces", True) and (o.get("position") or "") in TOP_POSITIONS
+            for o in overlays):
+        overlays, moved = face_safe_overlays(
+            overlays, _face_frac(src_path, src_offset, dur, work, cfg, crop_yh))
+        if moved:
+            log.info("text overlay moved to the bottom: the main face is in the top half")
+            warnings.append(f"{moved} top text overlay(s) moved to the bottom so they don't "
+                            "cover the main face (set avoid_faces false to keep them on top)")
     wm = single.get("watermark")
     draw = list(overlays)
     if wm and wm.get("text"):
         draw.append({"text": wm["text"], "role": "watermark", "position": wm.get("position"),
-                     "size": 40, "box": False, "animation": "none", "opacity": wm.get("opacity")})
+                     "size": 40, "animation": "none", "opacity": wm.get("opacity")})
     ass = build_overlay_ass(W, H, dur, cues, cap_op, draw, fonts)
     if overlays and ass:
         applied.append("text_overlay")
@@ -744,28 +916,30 @@ def compose(input_path, recipe, output_path, platform="generic", work_dir=None,
 
 
 def compose_all(input_path, recipe, out_dir, basename, work_dir=None, **kw):
-    """Render the recipe for every export platform. Platforms sharing an aspect
-    reuse one render (copied) since encoding settings are identical.
+    """Render the recipe once per output FORMAT. Platforms that take the same file
+    (TikTok, Reels and Shorts are all 1080x1920 H.264) share ONE file and one
+    deliverable whose platform is "tiktok+reels+shorts", checked against the
+    strictest limits of the group. (Before: one byte-identical copy per platform,
+    so a 14-clip job showed 42 files to review.)
 
-    basename may contain "{platform}" (filled per platform); otherwise
-    "_<platform>" is appended."""
+    basename may contain "{platform}" (filled with the group, e.g.
+    "tiktok-reels-shorts"); otherwise "_<group>" is appended."""
     from campaign.presets import preset
-    results, by_aspect = [], {}
     aspect_op = next((o.get("aspect") for o in (recipe or {}).get("ops") or []
                       if o.get("op") == "reframe"), None)
+    groups = {}
     for plat in (recipe or {}).get("export") or ["generic"]:
         p = preset(plat)
-        aspect = aspect_op or p["aspect"]
-        stem = (basename.replace("{platform}", p["platform"]) if "{platform}" in basename
-                else f"{basename}_{p['platform']}")
+        groups.setdefault(aspect_op or p["aspect"], []).append(p["platform"])
+    results = []
+    for aspect, plats in groups.items():
+        group = "+".join(dict.fromkeys(plats))
+        tag = group.replace("+", "-")
+        stem = (basename.replace("{platform}", tag) if "{platform}" in basename
+                else f"{basename}_{tag}")
         name = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_.") + ".mp4"
         path = os.path.join(out_dir, name)
-        if aspect in by_aspect and by_aspect[aspect]["duration"]:
-            shutil.copy2(by_aspect[aspect]["output_path"], path)
-            r = dict(by_aspect[aspect], output_path=path, platform=p["platform"], reused=True)
-        else:
-            r = compose(input_path, recipe, path, platform=p["platform"],
-                        work_dir=os.path.join(work_dir, p["platform"]) if work_dir else None, **kw)
-            by_aspect[aspect] = r
+        r = compose(input_path, recipe, path, platform=group,
+                    work_dir=os.path.join(work_dir, tag) if work_dir else None, **kw)
         results.append(r)
     return results

@@ -87,8 +87,7 @@ class TestRenderInput:
         r = E.render_input(str(d / "promo.mp4"), rec, str(tmp_path / "out"),
                            str(tmp_path / "work"), base)
         names = sorted(os.path.basename(x["output_path"]) for x in r["results"])
-        assert names == ["acme_promo_01_reels.mp4", "acme_promo_01_tiktok.mp4",
-                         "acme_promo_01_youtube.mp4"]
+        assert names == ["acme_promo_01_tiktok-reels.mp4", "acme_promo_01_youtube.mp4"]
         yt = media.probe(str(tmp_path / "out" / "acme_promo_01_youtube.mp4"))
         assert (yt["width"], yt["height"]) == (1920, 1080)
         assert {"logo", "text_overlay"} <= set(r["results"][0]["applied"])
@@ -160,16 +159,16 @@ class TestProcessInput:
             good = job_repo.add_input(job["id"], 0, str(d / "promo.mp4"))
             bad = job_repo.add_input(job["id"], 1, str(d / "notvideo.wav"))
             rows = E.process_input(job, c, good, "promo")
-            assert [r["platform"] for r in rows] == ["tiktok", "x"]
+            # TikTok and X take the same 9:16 file → ONE deliverable for both
+            assert [r["platform"] for r in rows] == ["tiktok+x"]
             assert all(r["status"] == "rendered" and os.path.isfile(r["path"]) for r in rows)
             assert rows[0]["qa"]["width"] == 1080 and "logo" in rows[0]["qa"]["applied"]
-            assert rows[1]["qa"].get("reused")             # x shares tiktok's 9:16 render
             with pytest.raises(ValueError):
                 E.process_input(job, c, bad, "notvideo")
             st = {i["idx"]: i for i in job_repo.list_inputs(job["id"])}
             assert st[0]["status"] == "done" and st[0]["probe"]["has_video"]
             assert st[1]["status"] == "failed" and "no video stream" in st[1]["error"]
             E.process_input(job, c, st[0], "promo")          # re-run replaces the rows
-            assert len(job_repo.list_deliverables(job["id"])) == 2
+            assert len(job_repo.list_deliverables(job["id"])) == 1
         finally:
             campaign_repo.delete_campaign(c["id"])

@@ -280,14 +280,17 @@ class TestCompose:
         qa = check_file(str(out), rec, "tiktok", r)
         assert qa["status"] == "pass", qa["checks"]     # logo found inside the body window
 
-    def test_compose_all_reuses_same_aspect(self, m, tmp_path):
+    def test_compose_all_one_file_per_format(self, m, tmp_path):
+        # TikTok + Reels take the same 9:16 file: ONE file/deliverable, not a copy each
         d, cat = m
         rec = _recipe(cat, [{"op": "trim", "max_duration": 2}], export=("tiktok", "reels", "youtube"))
         res = C.compose_all(str(d / "wide.mp4"), rec, str(tmp_path), "acme_v1")
-        assert [r["platform"] for r in res] == ["tiktok", "reels", "youtube"]
-        assert res[1].get("reused") and not res[2].get("reused")
-        assert (res[2]["width"], res[2]["height"]) == (1920, 1080)
+        assert [r["platform"] for r in res] == ["tiktok+reels", "youtube"]
+        assert os.path.basename(res[0]["output_path"]) == "acme_v1_tiktok-reels.mp4"
+        assert (res[0]["width"], res[0]["height"]) == (1080, 1920)
+        assert (res[1]["width"], res[1]["height"]) == (1920, 1080)
         assert all(os.path.isfile(r["output_path"]) for r in res)
+        assert len(os.listdir(tmp_path)) == 2
 
     def test_no_video_rejected(self, m, tmp_path):
         d, cat = m

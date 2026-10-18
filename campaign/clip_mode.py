@@ -214,6 +214,9 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
                               from_stage=redo, info=info,
                               progress=(lambda f, desc="": say(desc, 0.5 * f)) if progress else None)
         video_id, raw = info["video_id"], info["raw_path"]
+        # analysis is done: free the embedding model before framing/rendering
+        from pipeline.embedder import release_model
+        release_model()
         from pipeline import media
         job_repo.update_input(inp["id"], local_path=raw, probe=media.probe(raw),
                               video_id=video_id)
@@ -241,8 +244,13 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
                 # a finished standalone render would be "reused" (its finals have the
                 # standalone captions/branding): force this campaign's own render
                 main.invalidate_stage(video_id, "render")
+                n_ch = len(chosen)
                 main.render_clips(video_id, raw, render_flags(recipe),
-                                  clip_numbers=[c["clip_number"] for c in chosen])
+                                  clip_numbers=[c["clip_number"] for c in chosen],
+                                  progress=(lambda f, desc="": say(
+                                      desc or f"framing {n_ch} clips",
+                                      0.5 + 0.1 * max(0.0, (f - 0.85) / 0.15)))
+                                  if progress else None)
             finally:
                 ws.output_dir = saved_out
                 # standalone runs of this video must re-render their own finals
@@ -262,6 +270,8 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
         rows = []
         from pipeline.compositor import compose_all
         from campaign.recipe import variants_of
+        from campaign.onscreen_text import resolve_auto_text, segments_text
+        texts_so_far = []          # keeps AI-written on-screen lines distinct across clips
         for k, c in enumerate(chosen, 1):
             ranges = c.get("source_ranges") or [[c["start_time"], c["end_time"]]]
             segs = clip_segments(segments, ranges)
@@ -272,6 +282,7 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
             os.makedirs(cwork, exist_ok=True)
             say(f"composing clip {k}/{len(chosen)}", 0.6 + 0.35 * (k - 1) / len(chosen))
             results = []
+            auto_texts = {}
             groups = [(vertical, finals.get(c["id"])), (other, None)]
             for plats, src in groups:
                 if not plats:
@@ -284,6 +295,18 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
                     if not os.path.isfile(src):
                         cut_ranges(raw, ranges, src)
                 for vname, vrec in variants_of(recipe):
+                    key = (k, vname)
+                    if key not in auto_texts:
+                        caps = []
+                        auto_texts[key] = resolve_auto_text(
+                            vrec, campaign.get("brief"), segments_text(segs),
+                            context=" ".join(x for x in (c.get("hook"), c.get("reason"))
+                                             if x), avoid=texts_so_far,
+                            focus=spec.get("focus"), captions=caps) + (caps,)
+                        texts_so_far += auto_texts[key][1]
+                        warnings += [f"clip {k}: {w}" for w in auto_texts[key][2]]
+                    vrec, used, caps = auto_texts[key][0], auto_texts[key][1], \
+                        auto_texts[key][3]
                     part = compose_all(src, dict(vrec, export=plats), out_dir,
                                        variant_basename(base, vname),
                                        work_dir=cwork if vname == "main"
@@ -291,6 +314,9 @@ def process_input(job, campaign, inp, label, progress=None) -> list:
                                        transcript_segments=segs)
                     for r in part:
                         r["compose_input"], r["variant"] = src, vname
+                        r["onscreen_text"] = used
+                        if caps:
+                            r["post"] = {"caption": caps[0]}
                     results += part
             meta = {"number": c["clip_number"], "rank": k, "hook": c.get("hook"),
                     "title": c.get("suggested_title"), "hashtags": c.get("suggested_hashtags"),

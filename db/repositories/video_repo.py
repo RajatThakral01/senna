@@ -86,3 +86,20 @@ def update_raw_path(video_id: str, raw_path: str) -> None:
             conn.commit()
     finally:
         release_conn(conn)
+
+
+def list_recent(limit: int = 30) -> list:
+    """[{id, source_url, raw_path, created_at, clips}] newest first (review picker)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.id, v.source_url, v.raw_path, v.created_at,
+                       (SELECT count(*) FROM clips c WHERE c.video_id = v.id)
+                FROM videos v ORDER BY v.created_at DESC LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+    finally:
+        release_conn(conn)
+    return [{"id": str(r[0]), "source_url": r[1], "raw_path": r[2], "created_at": r[3],
+             "clips": int(r[4])} for r in rows]

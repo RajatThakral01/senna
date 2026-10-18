@@ -69,11 +69,75 @@ def _transcription_settings():
         return WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_DEVICE, WHISPER_COMPUTE, []
 
 
+def _release_heap():
+    """Hand freed memory back to the OS. glibc keeps freed blocks reserved, so after
+    deleting the Whisper models a process still held ~1.1 GB (measured: 1097 MB →
+    594 MB after malloc_trim). No-op off glibc."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _use_subprocess(keep_models):
+    """Run a one-off transcription in a child process so ALL its memory is returned
+    when it exits. On the 4 GB Docker VM, Whisper (~3.2 GB peak) left behind in the job
+    process plus the embedding model (~2.3 GB) got the job OOM-killed (15 Oct 2026).
+    TRANSCRIBE_SUBPROCESS=1|0|auto (auto: on, except under pytest so mocks apply).
+    Cached-model batch work (keep_models=True) stays in-process by design."""
+    if keep_models:
+        return False
+    mode = os.getenv("TRANSCRIBE_SUBPROCESS", "auto").strip().lower()
+    if mode in ("0", "false", "no", "off"):
+        return False
+    if mode in ("1", "true", "yes", "on"):
+        return True
+    return "PYTEST_CURRENT_TEST" not in os.environ
+
+
 def transcribe_audio(audio_path, output_dir="transcripts", keep_models=False):
     """
     Transcribes audio using WhisperX with word-level timestamps.
-    Returns path to transcript JSON file.
+    Returns (path to transcript JSON file, result dict).
     """
+    if _use_subprocess(keep_models):
+        if not os.path.exists(audio_path):
+            log.error("audio file missing path=%s", audio_path)
+            raise FileNotFoundError(audio_path)
+        # a plain child interpreter (not multiprocessing "spawn", which re-imports the
+        # parent's __main__ — ui.py would rebuild the whole Gradio app in the child)
+        import subprocess
+        import sys
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        code = ("import sys; from pipeline.transcriber import _transcribe_here; "
+                "_transcribe_here(sys.argv[1], sys.argv[2])")
+        log.info("transcribing in a child process (frees Whisper memory on exit)")
+        p = subprocess.Popen([sys.executable, "-c", code, os.path.abspath(audio_path),
+                              os.path.abspath(output_dir)], cwd=root)
+        t0 = time.monotonic()
+        while True:
+            try:
+                rc = p.wait(timeout=30)
+                break
+            except subprocess.TimeoutExpired:
+                # heartbeat: the child's own logs don't reach the job's activity feed
+                log.info("still transcribing speech… %.0f min so far",
+                         (time.monotonic() - t0) / 60)
+        if rc != 0:
+            raise RuntimeError(f"transcription child process failed (exit {rc}"
+                               + (", killed — out of memory?" if rc in (-9, 137)
+                                  else "") + ")")
+        path = os.path.join(output_dir, "transcript.json")
+        with open(path, encoding="utf-8") as f:
+            return path, json.load(f)
+    return _transcribe_here(audio_path, output_dir, keep_models)
+
+
+def _transcribe_here(audio_path, output_dir="transcripts", keep_models=False):
+    """transcribe_audio() in the current process."""
     log.info("transcribe start audio=%s model=%s lang=%s device=%s", audio_path, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_DEVICE)
     if not os.path.exists(audio_path):
         log.error("audio file missing path=%s", audio_path)
@@ -131,7 +195,9 @@ def transcribe_audio(audio_path, output_dir="transcripts", keep_models=False):
             torch.cuda.empty_cache()
     except Exception:
         pass
-    log.debug("freed WhisperX GPU memory")
+    if not keep_models:
+        _release_heap()
+    log.debug("freed WhisperX memory")
 
     # Glossary display corrections (traceable; timings + source untouched)
     if GLOSSARY:

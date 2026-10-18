@@ -66,6 +66,12 @@ def create_job(campaign_id, sources, mode_policy="auto", modes=None) -> dict:
     if isinstance(modes, (list, tuple)):
         modes = dict(enumerate(modes))
     modes = modes or {}
+    # a double-click on "Run job" queued the same work twice (two full renders)
+    for j in job_repo.list_jobs(campaign_id=campaign_id, limit=50):
+        if j["status"] in ("queued", "running") and \
+                [i["source"] for i in job_repo.list_inputs(j["id"])] == srcs:
+            raise ValueError(f"the same job is already {j['status']} (job {j['id'][:8]}); "
+                             "follow it in Jobs instead of starting it twice")
     job = job_repo.insert_job(campaign_id, recipe, version, mode_policy)
     for i, s in enumerate(srcs):
         m = modes.get(i)
@@ -79,6 +85,17 @@ def create_job(campaign_id, sources, mode_policy="auto", modes=None) -> dict:
 
 def route(probe, recipe, mode_policy="auto", override=None) -> tuple:
     """(mode, reason) for one input."""
+    mode, why = _route(probe, recipe, mode_policy, override)
+    dur = float((probe or {}).get("duration") or 0)
+    if mode == "edit" and dur > CLIP_THRESHOLD:
+        # edit mode keeps the video's opening (trim from 0): on a long video that is
+        # usually a cold open / sponsor slate, not the moment anyone wants
+        why += (f" ⚠️ {dur / 60:.1f} min video in edit mode: only its opening is used — "
+                "set override to clip to cut the best moments")
+    return mode, why
+
+
+def _route(probe, recipe, mode_policy="auto", override=None) -> tuple:
     if override in MODES:
         return override, "chosen for this input"
     if mode_policy in MODES:
@@ -117,13 +134,21 @@ def run_job(job_id, progress=None, cancel_event=None) -> dict:
     total = max(1, len(inputs))
     failures, t0 = [], time.monotonic()
 
+    from campaign import activity
+    last = {"text": None}
+
     def report(i, msg, inner=None):
         frac = min(0.99, (i + min(max(inner or 0.0, 0.0), 1.0)) / total)
         text = f"[{i + 1}/{total}] {msg}" if i < total else msg
         job_repo.update_job(job_id, progress=frac, message=text[:500])
+        if text != last["text"]:
+            activity.note(job_id, f"▸ {text[:200]}")
+            last["text"] = text
         if progress:
             progress(frac, text)
 
+    _cap = activity.capture(job_id)
+    _cap.__enter__()
     try:
         for i, inp in enumerate(inputs):
             if cancel_event is not None and cancel_event.is_set():
@@ -168,6 +193,7 @@ def run_job(job_id, progress=None, cancel_event=None) -> dict:
         log.info("job %.8s cancelled", job_id)
         return job_repo.get_job(job_id)
     finally:
+        _cap.__exit__(None, None, None)
         try:
             from pipeline.transcriber import release_models
             release_models()

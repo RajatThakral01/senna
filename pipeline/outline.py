@@ -245,7 +245,10 @@ def persist_outline(video_id, outline):
         outline_repo.insert_outline(
             video_id, "section", i,
             start_time=sec.get("start_time"), end_time=sec.get("end_time"),
-            title=sec.get("title"), content=sec)
+            title=sec.get("title"),
+            # keep how the outline was made: a reloaded LLM outline must still count as
+            # LLM (the analyzer otherwise padded every run with deterministic filler)
+            content=dict(sec, outline_method=outline.get("method")))
     if outline.get("video"):
         outline_repo.insert_outline(video_id, "video", 0, title="video",
                                     content=outline["video"])

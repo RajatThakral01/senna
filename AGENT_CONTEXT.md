@@ -246,6 +246,59 @@ clips (it once dropped 3 valid clips as "duplicates" of a rejected one).
 ### 5.9 Review & Correct (`review.py`, UI tab)
 Boundary / layout / caption-text / crop-ROI overrides, candidate accept/reject; re-render one
 clip via `render_clips(video_id, clip_numbers=[n])`. Manual ROIs always win over detection.
+Clip review: recent-video picker (`video_repo.list_recent`), clip opened by table click /
+◀ ▶ / number (`_rev_show`; it used to stay on clip 1).
+
+**Campaign UI rules (15 Oct 2026 fixes):** every campaign/job/video dropdown is created with
+`value=None` (Gradio 6 otherwise preselects the first entry; that sent a job to the wrong
+campaign) and is refreshed on `Tab.select`. New job shows `campaign_summary()` (all edit steps,
+or the open questions of a draft). Review & deliver: row click (`row_from_select`), ◀/▶
+(`step_row`), Approve/Reject → `decide()` returns the next row (auto-advance) and the message
+sits under the buttons; opening a job sets table + row 1 in ONE update (separate handlers
+raced a table click). `jobs.create_job` refuses a job identical to a queued/running one;
+`jobs.route` warns when a >3-min video runs in edit mode (only its opening is used).
+
+**UI layout + live progress (16 Oct 2026):** tabs `1 · Set up campaign` (steps A–D, JSON in
+an accordion), `2 · Start a job` (Run → jumps to Progress via `gr.Tabs(selected="progress")`),
+`3 · Progress`, `4 · Review & download`, then `Quick clips`, `Fix a clip (advanced)`. A status
+banner above all tabs (`status_banner`, 5 s timer). Progress tab: `progress_card()` (status chip,
+bar, step checklist from the job message via `CLIP_STEPS`/`EDIT_STEPS`, elapsed, "last activity",
+reassurance when quiet) + `activity_feed()` tailing `campaign/activity.py`'s per-job log
+(`work/campaigns/_activity/<job>.log`: INFO lines of the job's own thread, reworded), auto-picks the
+running job. Per-clip "framing clip k/n" progress from `render_clips`; the transcription child
+logs a heartbeat every 30 s. Review: counts line, capped table height, "Approve all that passed QA".
+
+**One file per format + text look + captions (16 Oct 2026):** `compose_all` groups export
+platforms by aspect → ONE file/deliverable per group, platform `"tiktok+reels+shorts"`
+(`presets.preset()` merges to the strictest limits, `platform_label()` for display); before,
+each platform got a byte-identical copy (42 rows for 14 clips). Text overlays: `style`
+box (default, TikTok white box per line) | clean (outline+shadow) | dark_box; bundled
+Montserrat ExtraBold (`assets/fonts`, OFL; `_add_builtin_fonts` → libass fontsdir);
+`balance_text()` (sentence-first, ≤3 even lines; *word* = highlight). `onscreen_text.write_post`
+returns {text, caption} in one Haiku call; captions carry the brief's required @tags /
+#hashtags / song; written even without `{auto}`; stored in `qa.post`, used by `posting_text`.
+The brief parser's grounding filter now keeps `{auto}`. `delivery.reexport_job` (+ Review
+button, background thread shown as a running job) rebuilds a job's files from the framed
+sources with current settings.
+
+**AI on-screen text:** a `text_overlay` with `text: "{auto}"` is written per clip by
+`campaign/onscreen_text.py` (brief rules + clip transcript + `clips.focus`, which wins over
+names in a reused brief; ≤90 chars, one rewrite if too long, distinct across clips). Stored as
+`qa.onscreen_text`; re-render reuses it; Review shows it in the editable recipe. LLM down →
+overlay dropped with a warning. The brief parser emits `{auto}` when the brief says to write
+your own text (rule 14). Overlay look: translucent padded box, 13% from the top on vertical.
+Top text moves to the bottom when the main face's median height is in the top half of the
+output frame (`face_safe_overlays` / `_face_frac`; `avoid_faces: false` keeps it on top).
+
+**Memory (4 GB Docker VM):** one-off transcription runs in a child interpreter
+(`TRANSCRIBE_SUBPROCESS=auto`, off under pytest; plain `python -c`, not multiprocessing spawn,
+which re-imports ui.py) so Whisper's ~3 GB is returned on exit; clip mode calls
+`embedder.release_model()` after analysis (3.2 GB → 1.1 GB before framing); both trim the glibc
+heap. Before this, the first u2 run was OOM-killed loading the embedding model.
+
+**Outline cache:** sections persist `outline_method`; a reloaded LLM outline keeps
+method "llm". It used to come back as "cached", which made the analyzer top up EVERY run with
+deterministic filler spans (and crash on legacy "HH:MM:SS" clip times — `_secs()` now parses both).
 
 ### 5.10 Optional adapters (default off, never fake)
 `speakers.py` + `diarization.py` (explicit `speaker_map` + pyannote/HF_TOKEN only), `visual.py`
@@ -414,7 +467,9 @@ All Phase D thresholds were tuned on MrBeast footage only (OPEN_ISSUES 1.9).
 
 ## 8. TESTS
 
-**300 pytest tests, all green** (`.venv/bin/python -m pytest -q`, ~25 s; needs the Docker DB
+**474 pytest tests, all green** (16 Oct 2026, run inside the app container, which has the DB:
+`docker exec senna-dev-app-1 python -m pytest -q`), plus `test_ui_e2e.py` — Playwright
+browser tests run from the host against the live app (`E2E_URL`, skips without it). Earlier: **300 pytest tests, all green** (`.venv/bin/python -m pytest -q`, ~25 s; needs the Docker DB
 for repo round-trip tests). Network/LLM always mocked; tests never create workspaces or run logs
 (`test_main` mocks `workspace.activate`, `run_log`, `_keep_awake`). Largest suites:
 test_framing 69 (detection geometry, tracker, cut detector, camera path, deslice, group target,

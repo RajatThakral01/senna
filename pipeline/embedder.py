@@ -122,6 +122,23 @@ def _get_model():
     return _MODEL
 
 
+def release_model():
+    """Unload the embedding model (~2.3 GB on CPU) and return the memory to the OS.
+    It is reloaded on the next embed call. Clip mode calls this after analysis so
+    framing + rendering have room on a 4 GB Docker VM."""
+    global _MODEL, _MODEL_KEY
+    if _MODEL is None:
+        return
+    _MODEL, _MODEL_KEY = None, None
+    gc.collect()
+    try:                                  # glibc keeps freed blocks unless trimmed
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+    log.info("embedding model released")
+
+
 def get_embedding_dim() -> int | None:
     """Return the EFFECTIVE output dimension after EMBED_DIM truncation."""
     try:

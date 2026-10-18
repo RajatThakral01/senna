@@ -189,12 +189,30 @@ Not on the roadmap: 2.3 (provider switch planned — small change in `llm_client
 
 ## 5. Untested since the refactor
 
-### 5.1 Gradio UI (`ui.py`) not exercised end-to-end in a browser — HIGH before using the UI
-- The campaign tabs (C7) are tested through their handlers (`test_campaign_ui.py`: create →
-  assets → parse → save → check inputs → run → review → re-render → zip) and the app was
-  launched and served all 6 tabs, but nobody has clicked through it in a browser yet. The
-  legacy "Quick clips" and "Clip review" tabs (selective re-render via
-  `render_clips(clip_numbers=…)`) still need a manual pass after the workspace refactor.
+### 5.1 Gradio UI browser coverage — PARTLY FIXED (15 Oct 2026)
+- First real use (15 Oct) found: Gradio 6 preselects the first dropdown entry, so a job ran on
+  the wrong campaign ("C8 Trial" demo: ACME intro, "You need this" hook, @acme end card) while
+  the intended campaign (u2) was a draft; table rows weren't clickable; no next/prev; the
+  approve/reject result showed at the page bottom; Clip review always showed clip 1; a
+  double-click queued the same job twice. All fixed; see AGENT_CONTEXT §5.9.
+- `test_ui_e2e.py` (Playwright, runs on the host against the live app) now covers Review &
+  deliver (row click, approve/reject auto-advance, ◀/▶, DB state), New-job campaign refresh
+  and summary, and the Clip-review picker. Still not browser-tested: Tab 1 asset upload +
+  parse, Tab 2 upload/run, Tab 5 Quick clips, Clip-review apply/re-render buttons.
+
+### 5.5 Fixed on 15 Oct 2026 during the u2 rerun (for the record)
+- OOM kill on the 4 GB Docker VM (Whisper memory kept + embedding model) → transcription in a
+  child process, embedding model released before framing, glibc heap trimmed.
+- Reloaded outlines lost their "llm" method → every run padded with deterministic filler clips;
+  the song input crashed on "HH:MM:SS" times in that path. Both fixed. Outlines cached before
+  this fix still say "cached": invalidate the outline stage to refresh them.
+- Top text covered faces on wide talk-show crops → moved to the bottom when the face is high.
+- Docker VM has only 4 GB: raising Docker Desktop's memory to 6 GB would add headroom.
+
+### 5.4 AI-written on-screen text (`{auto}`) — quality not yet measured — MEDIUM
+- `campaign/onscreen_text.py` writes one line per clip with Haiku 5.5 (purpose
+  `onscreen_text`). First live samples were on-brief; nobody has rated a full run yet. If the
+  lines are weak, route `onscreen_text` to Sonnet (`CLAUDE_SONNET_STAGES`).
 
 ### 5.2 CI test job never run — MEDIUM
 - `.github/workflows/ci.yml` now has a `tests` job (pgvector service, CPU torch, ffmpeg).

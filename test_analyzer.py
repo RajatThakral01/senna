@@ -152,3 +152,32 @@ class TestSplitIdsByTime:
             assert _extract_clips_from_chunk(
                 {"chunk_index": 0, "start_time": 0.0, "end_time": 60.0,
                  "text": "x"}, {}) == []
+
+
+# ── 15 Oct 2026: cached-outline method + string clip times ──────────────────
+
+def test_secs_accepts_numbers_and_clock_strings():
+    from pipeline.analyzer import _secs
+    assert _secs(100) == 100.0 and _secs("12.5") == 12.5
+    assert _secs("00:01:40") == 100.0 and _secs("01:40") == 100.0
+
+
+def test_deterministic_topup_with_string_ranges_does_not_crash():
+    # the song input failed with: could not convert string to float: '00:01:40'
+    from pipeline.analyzer import _deterministic_section_clips
+    out = _deterministic_section_clips("vid", {"sections": []}, [], [{"id": 0}], [], 3,
+                                       exclude_ranges=[("00:01:40", "00:02:10")])
+    assert out == []
+
+
+def test_persisted_outline_keeps_its_method():
+    from unittest.mock import patch
+    from pipeline import outline as O
+    rows = []
+    with patch("db.repositories.outline_repo.clear_outlines"), \
+            patch("db.repositories.outline_repo.insert_outline",
+                  side_effect=lambda *a, **k: rows.append(k.get("content"))), \
+            patch("pipeline.workspace.current", side_effect=RuntimeError("no ws")):
+        O.persist_outline("vid", {"method": "llm", "video": {},
+                                  "sections": [{"title": "a", "start_id": 0, "end_id": 3}]})
+    assert rows[0]["outline_method"] == "llm"

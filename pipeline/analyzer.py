@@ -246,7 +246,8 @@ def analyze(video_id: str, chunks: list[dict], config: dict,
             if run_repo.fingerprint_matches(video_id, "outline", ofp):
                 secs = outline_repo.get_outlines(video_id, "section")
                 if secs:
-                    outline = {"method": "cached", "sections": [
+                    made_by = (secs[0].get("content") or {}).get("outline_method")
+                    outline = {"method": made_by or "cached", "cached": True, "sections": [
                         {"title": s.get("title"), "start_id": s["content"].get("start_id"),
                          "end_id": s["content"].get("end_id"),
                          "start_time": s.get("start_time"), "end_time": s.get("end_time"),
@@ -367,6 +368,14 @@ def _split_ids_by_time(sids, sentences_by_id, target_span=55.0,
     return [g for g in groups if _span(g) >= min_span]
 
 
+def _secs(t):
+    """Seconds from a number or an "HH:MM:SS(.f)" / "MM:SS" string."""
+    if isinstance(t, (int, float)):
+        return float(t)
+    s = str(t).strip()
+    return to_sec(s) if ":" in s else float(s)
+
+
 def _deterministic_section_clips(video_id, outline, words, sentences, chunks,
                                  target, campaign_text="", cfg=None,
                                  exclude_ranges=None, start_clip_number=1):
@@ -387,7 +396,8 @@ def _deterministic_section_clips(video_id, outline, words, sentences, chunks,
     max_span = float(d_cfg.get("max_span_seconds", 90) or 0)
     max_cand = int(d_cfg.get("max_candidates", 24) or 24)
     by_id = {s["id"]: s for s in sentences}
-    excluded = [(float(a), float(b)) for a, b in (exclude_ranges or [])]
+    # clip times may be seconds or "HH:MM:SS" strings (legacy extraction path)
+    excluded = [(_secs(a), _secs(b)) for a, b in (exclude_ranges or [])]
 
     def _excluded(rng):
         a, b = rng

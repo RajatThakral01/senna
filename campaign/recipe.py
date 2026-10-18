@@ -81,8 +81,13 @@ OPS = {
                      "font": ("font", None, None),
                      "size": ("int", None, (16, 200)),
                      "color": ("color", "#FFFFFF", None),
-                     "box": ("bool", True, None),
-                     "animation": ("enum", "fade", ("none", "fade", "pop"))},
+                     "box": ("bool", True, None),        # legacy; use style
+                     # box = white box per line, black text (TikTok background style,
+                     # default), clean = white + black outline, dark_box = translucent
+                     "style": ("enum", "box", ("box", "clean", "dark_box")),
+                     "animation": ("enum", "fade", ("none", "fade", "pop")),
+                     # top text moves to the bottom when the main face is in the top half
+                     "avoid_faces": ("bool", True, None)},
     # ── phase C8 ──
     "watermark": {"text": ("text", REQUIRED, 80), "opacity": ("float", 0.35, (0.05, 1.0)),
                   "position": ("enum", "bottom-right", POSITIONS)},
@@ -491,6 +496,8 @@ def describe_op(o: dict) -> str:
                 f"Captions: {o['style']}, position {o['position']}"
                 + (", UPPERCASE" if o.get("uppercase") else ""))
     if op == "text_overlay":
+        if str(o.get("text") or "").strip() == "{auto}":
+            return f"Text ({o['role']}) written by AI for each clip, at {o['position']}{_when(o)}"
         return f"Text ({o['role']}) \"{o.get('text') or '?'}\" at {o['position']}{_when(o)}"
     if op == "watermark":
         return f"Watermark \"{o.get('text')}\" {o['position']} at {o['opacity']:.0%}"
